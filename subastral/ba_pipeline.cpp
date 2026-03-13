@@ -10,7 +10,7 @@
 #include "subastral/backend/solver/lm_solver.hpp"
 #include "subastral/backend/solver/lm_solver_gpu.cuh"
 #include "subastral/loader/bal_loader.h"
-#include "subastral/viz/ba_visualizer.hpp"
+#include "viz/opencv/ba_visualizer.hpp"
 #include "viz/rerun/ba_visualizer.hpp"
 
 namespace substral {

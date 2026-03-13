@@ -1,4 +1,4 @@
-#include "subastral/viz/ba_visualizer.hpp"
+#include "viz/opencv/ba_visualizer.hpp"
 
 #include <algorithm>
 #include <cmath>

@@ -6,3 +6,12 @@ external
 .clangd
 .ruff_cache/
 compile_commands.json
+
+# Secrets (buildkite agent tokens, API keys — NEVER commit)
+scripts/secrets
+
+*.aux.md
+
+# Coverage output
+coverage_report/
+coverage.lcov

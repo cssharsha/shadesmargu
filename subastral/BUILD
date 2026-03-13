@@ -23,7 +23,7 @@ cc_library(
         "//subastral/backend/solver:lm_solver",
         "//subastral/backend/solver:lm_solver_gpu",
         "//subastral/loader:bal_loader",
-        "//subastral/viz:ba_visualizer",
+        "//viz/opencv:ba_visualizer",
         "//viz/rerun:ba_visualizer",
     ],
 )
