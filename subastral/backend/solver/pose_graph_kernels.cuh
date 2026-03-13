@@ -3,6 +3,7 @@
 #include <cuda_runtime.h>
 
 #include "subastral/backend/lie/se3_gpu.cuh"
+#include "subastral/backend/solver/loss_function_gpu.cuh"
 
 namespace substral {
 namespace backend {
@@ -236,6 +237,115 @@ __global__ void computePoseGraphCostKernel(
     double* d_costs);
 
 // =============================================================================
+// Kernel 13: Compute per-edge IRLS weight for robust loss
+// =============================================================================
+//
+// For each edge k, computes the squared Mahalanobis distance:
+//   s_k = e_k^T * Omega_k * e_k
+// Then evaluates the IRLS weight:
+//   w_k = rho'(s_k)
+//
+// One thread per edge.
+//
+__global__ void computeEdgeWeightsKernel(
+    const double* __restrict__ d_residuals,
+    const double* __restrict__ d_info_matrices,
+    int num_edges,
+    gpu::LossType loss_type,
+    double loss_param,
+    double* d_weights);
+
+// =============================================================================
+// Kernel 14: Compute per-edge robust cost
+// =============================================================================
+//
+// For each edge k, computes:
+//   cost_k = rho(e_k^T * Omega_k * e_k)
+// instead of the raw squared Mahalanobis distance.
+//
+// One thread per edge.
+//
+__global__ void computePoseGraphRobustCostKernel(
+    const double* __restrict__ d_residuals,
+    const double* __restrict__ d_info_matrices,
+    int num_edges,
+    gpu::LossType loss_type,
+    double loss_param,
+    double* d_costs);
+
+// =============================================================================
+// Kernel 7: Symmetric SpMV — y = A * x (A stored as lower-triangle CSR)
+// =============================================================================
+//
+// For each row i, iterates over the lower-triangle entries (i, j) where j <= i.
+// Diagonal entries (j == i) contribute val * x[i] to y[i].
+// Off-diagonal entries (j < i) contribute val * x[j] to y[i] (direct)
+// and val * x[i] to y[j] (symmetric, via atomicAdd).
+//
+// y must be zeroed before calling this kernel.
+// One thread per row.
+//
+__global__ void symmetricSpMVKernel(
+    const int* __restrict__ row_ptr,
+    const int* __restrict__ col_ind,
+    const double* __restrict__ values,
+    const double* __restrict__ x,
+    double* y,
+    int num_rows);
+
+// =============================================================================
+// Kernel 8: Extract and invert 6x6 diagonal blocks (Jacobi preconditioner)
+// =============================================================================
+//
+// For each free pose, extracts the 6x6 diagonal block from the damped CSR
+// Hessian and computes its inverse via Gauss-Jordan elimination.
+// Stores the 36-element inverse block contiguously.
+//
+// One thread per free pose.
+//
+__global__ void extractAndInvertDiagBlocksKernel(
+    const double* __restrict__ csr_values,
+    const int* __restrict__ diag_offsets,
+    int num_free_poses,
+    double* inv_blocks);
+
+// =============================================================================
+// Kernel 9: Apply block-diagonal preconditioner — z = M^{-1} * r
+// =============================================================================
+//
+// For each free pose, multiplies the 6x6 inverse block by the corresponding
+// 6-element segment of r to produce z.
+//
+// One thread per free pose.
+//
+__global__ void applyBlockPreconditionerKernel(
+    const double* __restrict__ inv_blocks,
+    const double* __restrict__ r_vec,
+    int num_free_poses,
+    double* z);
+
+// =============================================================================
+// Kernel 10: Vector axpy — y = alpha * x + y
+// =============================================================================
+__global__ void axpyKernel(double alpha, const double* __restrict__ x,
+                           double* y, int n);
+
+// =============================================================================
+// Kernel 11: Vector xpby — y = x + beta * y
+// =============================================================================
+//
+// Used for the PCG direction update: p = z + beta * p
+// Reads x, reads+writes y in-place.
+//
+__global__ void xpbyKernel(const double* __restrict__ x, double beta,
+                           double* y, int n);
+
+// =============================================================================
+// Kernel 12: Vector negate — y = -x
+// =============================================================================
+__global__ void negateKernel(const double* __restrict__ x, double* y, int n);
+
+// =============================================================================
 // Host wrappers
 // =============================================================================
 
@@ -256,7 +366,8 @@ void launchAccumulatePoseGraphHessianCSR(
     const int* d_edge_var_i, const int* d_edge_var_j,
     const int* d_block_offsets,
     int num_edges, int num_free_poses,
-    double* d_csr_values, double* d_b);
+    double* d_csr_values, double* d_b,
+    const double* d_weights = nullptr);
 
 void launchApplyPoseGraphDampingCSR(
     double* d_csr_values, const int* d_diag_offsets,
@@ -270,6 +381,36 @@ void launchUpdatePoses(
 void launchComputePoseGraphCost(
     const double* d_residuals, const double* d_info_matrices,
     int num_edges, double* d_costs);
+
+// Robust loss kernels
+void launchComputeEdgeWeights(
+    const double* d_residuals, const double* d_info_matrices,
+    int num_edges, gpu::LossType loss_type, double loss_param,
+    double* d_weights);
+
+void launchComputePoseGraphRobustCost(
+    const double* d_residuals, const double* d_info_matrices,
+    int num_edges, gpu::LossType loss_type, double loss_param,
+    double* d_costs);
+
+// PCG support kernels
+void launchSymmetricSpMV(
+    const int* d_row_ptr, const int* d_col_ind, const double* d_values,
+    const double* d_x, double* d_y, int num_rows);
+
+void launchExtractAndInvertDiagBlocks(
+    const double* d_csr_values, const int* d_diag_offsets,
+    int num_free_poses, double* d_inv_blocks);
+
+void launchApplyBlockPreconditioner(
+    const double* d_inv_blocks, const double* d_r,
+    int num_free_poses, double* d_z);
+
+void launchAxpy(double alpha, const double* d_x, double* d_y, int n);
+
+void launchXpby(const double* d_x, double beta, double* d_y, int n);
+
+void launchNegate(const double* d_x, double* d_y, int n);
 
 }  // namespace pg_gpu
 }  // namespace solver

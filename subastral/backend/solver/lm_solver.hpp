@@ -43,6 +43,14 @@ enum class LossType {
   CAUCHY = 2,   // Cauchy/Lorentzian: logarithmic growth, heavy down-weighting
 };
 
+// =============================================================================
+// Linear solver type for the inner linear system solve
+// =============================================================================
+enum class LinearSolverType {
+  CHOLESKY = 0,  // Sparse Cholesky (cusolverSpDcsrlsvchol) — requires SPD
+  PCG = 1,  // Preconditioned Conjugate Gradient — handles indefinite systems
+};
+
 struct LMConfig {
   double initial_lambda = 1e-3;
   double lambda_factor = 10.0;  // multiply/divide λ by this
@@ -66,6 +74,15 @@ struct LMConfig {
   // When false (default):
   //   - Classical global angle-axis parameterization with additive updates
   bool use_lie = false;
+
+  // Linear solver for the inner system (H + λI) δ = -g.
+  // CHOLESKY: sparse Cholesky via cuSOLVER (fast, requires SPD).
+  // PCG: Preconditioned Conjugate Gradient (handles indefinite systems).
+  LinearSolverType linear_solver = LinearSolverType::CHOLESKY;
+
+  // PCG-specific parameters (ignored when linear_solver == CHOLESKY)
+  int pcg_max_iterations = 500;  // max CG iterations per linear solve
+  double pcg_tolerance = 1e-8;   // relative residual tolerance for CG
 
   bool verbose = true;
 };

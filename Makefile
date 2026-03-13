@@ -1,4 +1,4 @@
-.PHONY: all compile_commands build run docker clean coverage setup-ci setup-ci-ssh clean-ci
+.PHONY: all compile_commands build run docker clean coverage setup-ci setup-ci-ssh clean-ci rerun
 
 COMPOSE := docker compose -p shadesmar_dev -f docker/docker-compose.yml
 SERVICE := shadesmar_gu
@@ -84,6 +84,13 @@ clean-ci:
 	@echo "=== Restarting agent ==="
 	@sudo systemctl restart buildkite-agent
 	@echo "Done. Retrigger the build from the Buildkite dashboard."
+
+rerun:
+	@$(COMPOSE) exec -T $(SERVICE) pkill -f 'rerun --serve-web' 2>/dev/null || true
+	@sleep 1
+	$(COMPOSE) exec -d $(SERVICE) rerun --serve-web
+	@echo "Rerun web viewer: http://localhost:9090"
+	@echo "gRPC proxy: rerun+http://localhost:9876/proxy"
 
 docker-clean:
 	$(COMPOSE) down

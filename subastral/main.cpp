@@ -24,6 +24,9 @@
 //   --loss <type>      Loss function: trivial, huber, cauchy (default: trivial)
 //   --loss-param <v>   Loss parameter: delta for Huber, c for Cauchy
 //   (default: 1.0)
+//   --pcg              Use PCG linear solver (default: Cholesky)
+//   --pcg-max-iter <n> Max PCG iterations per linear solve (default: 500)
+//   --pcg-tol <v>      PCG relative tolerance (default: 1e-8)
 //   --max-iter <n>     Maximum LM iterations (default: 50)
 //   --lambda <v>       Initial LM damping (default: 1e-3)
 //   --quiet            Suppress per-iteration output
@@ -40,11 +43,15 @@ static void printUsage(const char* prog) {
       << "\nModes:\n"
       << "  (default)          Bundle Adjustment (BAL format)\n"
       << "  --pose-graph       Pose-Graph SLAM (g2o format)\n"
+      << "  --chordal-init     Pose-Graph SLAM with chordal rotation init\n"
       << "\nOptions:\n"
       << "  --cpu              Use CPU solver (default: GPU)\n"
       << "  --lie              Use SE(3) Lie group parameterization\n"
       << "  --loss <type>      trivial|huber|cauchy (default: trivial)\n"
       << "  --loss-param <v>   Loss parameter (default: 1.0)\n"
+      << "  --pcg              Use PCG linear solver (default: Cholesky)\n"
+      << "  --pcg-max-iter <n> Max PCG iterations per solve (default: 500)\n"
+      << "  --pcg-tol <v>      PCG relative tolerance (default: 1e-8)\n"
       << "  --max-iter <n>     Max LM iterations (default: 50)\n"
       << "  --lambda <v>       Initial lambda (default: 1e-3)\n"
       << "  --quiet            Suppress per-iteration output\n"
@@ -93,11 +100,14 @@ static void* workerThread(void* arg) {
 
   substral::Subastral subastral;
   bool pose_graph = false;
+  bool chordal_init = false;
 
   // Parse optional arguments
   for (int i = 2; i < argc; ++i) {
     if (std::strcmp(argv[i], "--pose-graph") == 0) {
       pose_graph = true;
+    } else if (std::strcmp(argv[i], "--chordal-init") == 0) {
+      chordal_init = true;
     } else if (std::strcmp(argv[i], "--cpu") == 0) {
       subastral.config().use_gpu = false;
     } else if (std::strcmp(argv[i], "--lie") == 0) {
@@ -120,6 +130,13 @@ static void* workerThread(void* arg) {
       }
     } else if (std::strcmp(argv[i], "--loss-param") == 0 && i + 1 < argc) {
       subastral.config().solver.loss_param = std::atof(argv[++i]);
+    } else if (std::strcmp(argv[i], "--pcg") == 0) {
+      subastral.config().solver.linear_solver =
+          substral::backend::solver::LinearSolverType::PCG;
+    } else if (std::strcmp(argv[i], "--pcg-max-iter") == 0 && i + 1 < argc) {
+      subastral.config().solver.pcg_max_iterations = std::atoi(argv[++i]);
+    } else if (std::strcmp(argv[i], "--pcg-tol") == 0 && i + 1 < argc) {
+      subastral.config().solver.pcg_tolerance = std::atof(argv[++i]);
     } else if (std::strcmp(argv[i], "--max-iter") == 0 && i + 1 < argc) {
       subastral.config().solver.max_iterations = std::atoi(argv[++i]);
     } else if (std::strcmp(argv[i], "--lambda") == 0 && i + 1 < argc) {
@@ -147,7 +164,9 @@ static void* workerThread(void* arg) {
   }
 
   // Create the appropriate pipeline
-  if (pose_graph) {
+  if (chordal_init) {
+    subastral.createPipeline("chordal-init");
+  } else if (pose_graph) {
     subastral.createPipeline("pose-graph");
   }
 

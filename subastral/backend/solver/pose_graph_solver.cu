@@ -14,6 +14,7 @@
 #include <set>
 #include <vector>
 
+#include "subastral/backend/solver/pcg_solver.cuh"
 #include "subastral/backend/solver/pose_graph_kernels.cuh"
 
 namespace substral {
@@ -315,16 +316,26 @@ struct PGSolverState {
   thrust::device_vector<double> d_delta;         // [total_dim]
   thrust::device_vector<double> d_saved_poses;   // [num_poses * 7]
   thrust::device_vector<double> d_costs;         // [num_edges]
+  thrust::device_vector<double> d_weights;       // [num_edges] IRLS weights
 
-  // cuSOLVER sparse
+  // PCG workspace (allocated only when using PCG solver)
+  thrust::device_vector<double> d_pcg_r;             // [total_dim]
+  thrust::device_vector<double> d_pcg_z;             // [total_dim]
+  thrust::device_vector<double> d_pcg_p;             // [total_dim]
+  thrust::device_vector<double> d_pcg_Ap;            // [total_dim]
+  thrust::device_vector<double> d_precond_blocks;    // [num_free * 36]
+
+  // cuSOLVER sparse (allocated only when using Cholesky solver)
   cusolverSpHandle_t cusolver_handle = nullptr;
   cusparseMatDescr_t mat_descr = nullptr;
 
   int nnz;
+  LinearSolverType linear_solver_type = LinearSolverType::CHOLESKY;
 
   void init(PoseGraphProblem& problem, const CSRPattern& pattern,
             const std::map<int, int>& id_to_pose_idx,
-            const std::vector<int>& vertex_idx_map_vec) {
+            const std::vector<int>& vertex_idx_map_vec,
+            LinearSolverType solver_type = LinearSolverType::CHOLESKY) {
     num_poses = problem.get_num_poses();
     num_edges = problem.get_num_edges();
     num_free = problem.get_num_free_params() / 6;
@@ -385,13 +396,25 @@ struct PGSolverState {
     d_delta.resize(total_dim, 0.0);
     d_saved_poses.resize(num_poses * 7);
     d_costs.resize(num_edges);
+    d_weights.resize(num_edges);
 
-    // cuSOLVER sparse Cholesky requires CUSPARSE_MATRIX_TYPE_GENERAL.
-    // With reorder=0, it only reads the lower triangle of the CSR data.
-    cusolverSpCreate(&cusolver_handle);
-    cusparseCreateMatDescr(&mat_descr);
-    cusparseSetMatType(mat_descr, CUSPARSE_MATRIX_TYPE_GENERAL);
-    cusparseSetMatIndexBase(mat_descr, CUSPARSE_INDEX_BASE_ZERO);
+    linear_solver_type = solver_type;
+
+    if (solver_type == LinearSolverType::PCG) {
+      // Allocate PCG workspace
+      d_pcg_r.resize(total_dim, 0.0);
+      d_pcg_z.resize(total_dim, 0.0);
+      d_pcg_p.resize(total_dim, 0.0);
+      d_pcg_Ap.resize(total_dim, 0.0);
+      d_precond_blocks.resize(num_free * 36, 0.0);
+    } else {
+      // cuSOLVER sparse Cholesky requires CUSPARSE_MATRIX_TYPE_GENERAL.
+      // With reorder=0, it only reads the lower triangle of the CSR data.
+      cusolverSpCreate(&cusolver_handle);
+      cusparseCreateMatDescr(&mat_descr);
+      cusparseSetMatType(mat_descr, CUSPARSE_MATRIX_TYPE_GENERAL);
+      cusparseSetMatIndexBase(mat_descr, CUSPARSE_INDEX_BASE_ZERO);
+    }
   }
 
   void downloadPoses(PoseGraphProblem& problem,
@@ -469,10 +492,20 @@ LMResult solvePoseGraph_GPU(PoseGraphProblem& problem,
   int num_free = var_idx;
   int total_dim = num_free * 6;
 
+  bool use_robust = (config.loss_type != LossType::TRIVIAL);
+
   if (config.verbose) {
     std::cout << "PG-GPU: " << num_poses << " poses (" << num_free
               << " free), " << num_edges << " edges, "
               << total_dim << " DOF" << std::endl;
+    std::cout << "PG-GPU: linear solver = "
+              << (config.linear_solver == LinearSolverType::PCG ? "PCG" : "Cholesky")
+              << std::endl;
+    if (use_robust) {
+      std::cout << "PG-GPU: loss function = "
+                << (config.loss_type == LossType::HUBER ? "Huber" : "Cauchy")
+                << " (param=" << config.loss_param << ")" << std::endl;
+    }
   }
 
   // Build CSR pattern
@@ -486,7 +519,8 @@ LMResult solvePoseGraph_GPU(PoseGraphProblem& problem,
 
   // Initialize GPU state
   PGSolverState state;
-  state.init(problem, pattern, id_to_pose_idx, vertex_idx_map);
+  state.init(problem, pattern, id_to_pose_idx, vertex_idx_map,
+             config.linear_solver);
 
   // Raw device pointers
   double* p_poses = thrust::raw_pointer_cast(state.d_poses.data());
@@ -510,11 +544,22 @@ LMResult solvePoseGraph_GPU(PoseGraphProblem& problem,
   double* p_delta = thrust::raw_pointer_cast(state.d_delta.data());
   double* p_saved = thrust::raw_pointer_cast(state.d_saved_poses.data());
   double* p_costs = thrust::raw_pointer_cast(state.d_costs.data());
+  double* p_weights = thrust::raw_pointer_cast(state.d_weights.data());
+
+  // Convert loss type for GPU kernels
+  gpu::LossType gpu_loss_type =
+      static_cast<gpu::LossType>(static_cast<int>(config.loss_type));
+  double loss_param = config.loss_param;
 
   // Compute initial cost
   pg_gpu::launchComputePoseGraphResiduals(
       p_poses, p_measurements, p_from, p_to, num_edges, p_residuals);
-  pg_gpu::launchComputePoseGraphCost(p_residuals, p_info, num_edges, p_costs);
+  if (use_robust) {
+    pg_gpu::launchComputePoseGraphRobustCost(
+        p_residuals, p_info, num_edges, gpu_loss_type, loss_param, p_costs);
+  } else {
+    pg_gpu::launchComputePoseGraphCost(p_residuals, p_info, num_edges, p_costs);
+  }
   cudaDeviceSynchronize();
 
   double current_cost = 0.5 * thrust::reduce(
@@ -547,6 +592,12 @@ LMResult solvePoseGraph_GPU(PoseGraphProblem& problem,
     pg_gpu::launchComputePoseGraphJacobians(
         p_poses, p_from, p_to, num_edges, p_residuals, p_Ji, p_Jj);
 
+    // Step 2b: Compute IRLS weights for robust loss
+    if (use_robust) {
+      pg_gpu::launchComputeEdgeWeights(
+          p_residuals, p_info, num_edges, gpu_loss_type, loss_param, p_weights);
+    }
+
     // Step 3: Zero and accumulate Hessian + gradient
     cudaMemset(p_csr_val, 0, state.nnz * sizeof(double));
     cudaMemset(p_b, 0, total_dim * sizeof(double));
@@ -554,7 +605,8 @@ LMResult solvePoseGraph_GPU(PoseGraphProblem& problem,
     pg_gpu::launchAccumulatePoseGraphHessianCSR(
         p_residuals, p_Ji, p_Jj, p_info,
         p_edge_var_i, p_edge_var_j, p_block_off,
-        num_edges, num_free, p_csr_val, p_b);
+        num_edges, num_free, p_csr_val, p_b,
+        use_robust ? p_weights : nullptr);
 
     // Check gradient convergence
     {
@@ -586,49 +638,105 @@ LMResult solvePoseGraph_GPU(PoseGraphProblem& problem,
 
       cudaDeviceSynchronize();
 
-      // Step 5: Solve H_damped · δ = -b via cuSOLVER sparse Cholesky
-      // Set up RHS: delta = -b
-      {
-        std::vector<double> h_b(total_dim);
-        cudaMemcpy(h_b.data(), p_b, total_dim * sizeof(double),
-                   cudaMemcpyDeviceToHost);
-        std::vector<double> h_neg_b(total_dim);
-        for (int i = 0; i < total_dim; ++i) h_neg_b[i] = -h_b[i];
-        cudaMemcpy(p_delta, h_neg_b.data(), total_dim * sizeof(double),
-                   cudaMemcpyHostToDevice);
+      // Step 5: Solve H_damped · δ = -b
+      bool solve_ok = false;
+
+      if (config.linear_solver == LinearSolverType::PCG) {
+        // --- PCG path ---
+        // Compute RHS: neg_b = -b (on device)
+        double* p_pcg_r = thrust::raw_pointer_cast(state.d_pcg_r.data());
+        double* p_pcg_z = thrust::raw_pointer_cast(state.d_pcg_z.data());
+        double* p_pcg_p = thrust::raw_pointer_cast(state.d_pcg_p.data());
+        double* p_pcg_Ap = thrust::raw_pointer_cast(state.d_pcg_Ap.data());
+        double* p_precond = thrust::raw_pointer_cast(state.d_precond_blocks.data());
+
+        // Compute RHS: neg_b = -b (stored in pcg_Ap as temp)
+        pg_gpu::launchNegate(p_b, p_pcg_Ap, total_dim);
+
+        // Build block-diagonal preconditioner from damped Hessian
+        pg_gpu::launchExtractAndInvertDiagBlocks(
+            p_csr_val_damped, p_diag_off, num_free, p_precond);
+        cudaDeviceSynchronize();
+
+        int pcg_iters = solvePCG_GPU(
+            p_row_ptr, p_col_ind, p_csr_val_damped,
+            p_pcg_Ap,  // RHS (-b)
+            p_delta,   // solution output
+            p_precond,
+            total_dim, num_free,
+            config.pcg_max_iterations, config.pcg_tolerance,
+            p_pcg_r, p_pcg_z, p_pcg_p, p_pcg_Ap);
+
+        cudaDeviceSynchronize();
+
+        if (pcg_iters > 0) {
+          solve_ok = true;
+          if (config.verbose) {
+            std::cout << "PG-GPU: PCG converged in " << pcg_iters
+                      << " iterations (lambda=" << lambda << ")" << std::endl;
+          }
+        } else {
+          // PCG did not converge — increase lambda and retry
+          if (config.verbose) {
+            std::cerr << "PG-GPU: PCG did not converge (" << -pcg_iters
+                      << " iters, lambda=" << lambda
+                      << "), increasing lambda" << std::endl;
+          }
+          lambda = std::min(lambda * config.lambda_factor, config.max_lambda);
+          if (lambda >= config.max_lambda) {
+            result.termination_reason = "Lambda exceeded maximum";
+            break;
+          }
+          continue;
+        }
+      } else {
+        // --- Cholesky path (original) ---
+        // Set up RHS: delta = -b
+        {
+          std::vector<double> h_b(total_dim);
+          cudaMemcpy(h_b.data(), p_b, total_dim * sizeof(double),
+                     cudaMemcpyDeviceToHost);
+          std::vector<double> h_neg_b(total_dim);
+          for (int i = 0; i < total_dim; ++i) h_neg_b[i] = -h_b[i];
+          cudaMemcpy(p_delta, h_neg_b.data(), total_dim * sizeof(double),
+                     cudaMemcpyHostToDevice);
+        }
+
+        int singularity = -1;
+        cusolverStatus_t status = cusolverSpDcsrlsvchol(
+            state.cusolver_handle,
+            total_dim,
+            state.nnz,
+            state.mat_descr,
+            p_csr_val_damped,
+            p_row_ptr,
+            p_col_ind,
+            p_delta,   // RHS on input
+            1e-14,     // tolerance
+            0,         // reorder=0: only lower triangle needed (no full matrix)
+            p_delta,   // solution on output
+            &singularity);
+
+        cudaDeviceSynchronize();
+
+        if (status != CUSOLVER_STATUS_SUCCESS || singularity >= 0) {
+          if (config.verbose) {
+            std::cerr << "PG-GPU: sparse Cholesky failed (status=" << status
+                      << ", singularity=" << singularity
+                      << ", lambda=" << lambda << "), increasing lambda"
+                      << std::endl;
+          }
+          lambda = std::min(lambda * config.lambda_factor, config.max_lambda);
+          if (lambda >= config.max_lambda) {
+            result.termination_reason = "Lambda exceeded maximum";
+            break;
+          }
+          continue;
+        }
+        solve_ok = true;
       }
 
-      int singularity = -1;
-      cusolverStatus_t status = cusolverSpDcsrlsvchol(
-          state.cusolver_handle,
-          total_dim,
-          state.nnz,
-          state.mat_descr,
-          p_csr_val_damped,
-          p_row_ptr,
-          p_col_ind,
-          p_delta,   // RHS on input
-          1e-14,     // tolerance
-          0,         // reorder=0: only lower triangle needed (no full matrix)
-          p_delta,   // solution on output
-          &singularity);
-
-      cudaDeviceSynchronize();
-
-      if (status != CUSOLVER_STATUS_SUCCESS || singularity >= 0) {
-        if (config.verbose) {
-          std::cerr << "PG-GPU: sparse Cholesky failed (status=" << status
-                    << ", singularity=" << singularity
-                    << ", lambda=" << lambda << "), increasing lambda"
-                    << std::endl;
-        }
-        lambda = std::min(lambda * config.lambda_factor, config.max_lambda);
-        if (lambda >= config.max_lambda) {
-          result.termination_reason = "Lambda exceeded maximum";
-          break;
-        }
-        continue;
-      }
+      if (!solve_ok) continue;
 
       // Check step size
       {
@@ -654,13 +762,36 @@ LMResult solvePoseGraph_GPU(PoseGraphProblem& problem,
       // Step 7: Evaluate new cost
       pg_gpu::launchComputePoseGraphResiduals(
           p_poses, p_measurements, p_from, p_to, num_edges, p_residuals);
-      pg_gpu::launchComputePoseGraphCost(
-          p_residuals, p_info, num_edges, p_costs);
+      if (use_robust) {
+        pg_gpu::launchComputePoseGraphRobustCost(
+            p_residuals, p_info, num_edges, gpu_loss_type, loss_param, p_costs);
+      } else {
+        pg_gpu::launchComputePoseGraphCost(
+            p_residuals, p_info, num_edges, p_costs);
+      }
       cudaDeviceSynchronize();
 
       double new_cost = 0.5 * thrust::reduce(
           state.d_costs.begin(), state.d_costs.end(),
           0.0, thrust::plus<double>());
+
+      // Reject invalid costs (NaN, Inf, or negative — cost is a sum of
+      // squared Mahalanobis distances and must be non-negative)
+      if (std::isnan(new_cost) || std::isinf(new_cost) || new_cost < 0.0) {
+        if (config.verbose) {
+          std::cerr << "PG-GPU: invalid cost " << new_cost
+                    << " (lambda=" << lambda << "), rejecting step"
+                    << std::endl;
+        }
+        cudaMemcpy(p_poses, p_saved, num_poses * 7 * sizeof(double),
+                   cudaMemcpyDeviceToDevice);
+        lambda = std::min(lambda * config.lambda_factor, config.max_lambda);
+        if (lambda >= config.max_lambda) {
+          result.termination_reason = "Lambda exceeded maximum";
+          break;
+        }
+        continue;
+      }
 
       if (new_cost < current_cost) {
         double cost_change = current_cost - new_cost;

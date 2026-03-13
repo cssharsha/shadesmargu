@@ -61,10 +61,23 @@ cuda_library(
 cuda_library(
     name = "pose_graph_kernels",
     srcs = ["pose_graph_kernels.cu"],
-    hdrs = ["pose_graph_kernels.cuh"],
+    hdrs = [
+        "loss_function_gpu.cuh",
+        "pose_graph_kernels.cuh",
+    ],
     visibility = ["//visibility:public"],
     deps = [
         "//subastral/backend/lie:se3_gpu",
+    ],
+)
+
+cuda_library(
+    name = "pcg_solver",
+    srcs = ["pcg_solver.cu"],
+    hdrs = ["pcg_solver.cuh"],
+    visibility = ["//visibility:public"],
+    deps = [
+        ":pose_graph_kernels",
     ],
 )
 
@@ -75,6 +88,7 @@ cuda_library(
     visibility = ["//visibility:public"],
     deps = [
         ":lm_solver",
+        ":pcg_solver",
         ":pose_graph_kernels",
         "//subastral/backend:backend",
         "@cuda_toolkit//:cusolver",
@@ -143,6 +157,21 @@ cc_test(
         "//subastral/backend/ops:ops_cpu",
         "@com_google_googletest//:gtest_main",
         "@eigen//:eigen",
+    ],
+    size = "medium",
+    tags = ["requires-network"],
+)
+
+cc_test(
+    name = "pcg_solver_test",
+    srcs = ["tests/pcg_solver_test.cpp"],
+    deps = [
+        ":pcg_solver",
+        ":pose_graph_kernels",
+        ":pose_graph_solver",
+        "//subastral/backend:backend",
+        "//subastral/loader:g2o_loader",
+        "@com_google_googletest//:gtest_main",
     ],
     size = "medium",
     tags = ["requires-network"],

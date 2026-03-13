@@ -4,6 +4,7 @@
 #include <stdexcept>
 
 #include "subastral/ba_pipeline.hpp"
+#include "subastral/chordal_init_pipeline.hpp"
 #include "subastral/pose_graph_pipeline.hpp"
 
 namespace substral {
@@ -16,11 +17,14 @@ Subastral::Subastral() {
 void Subastral::createPipeline(const std::string& mode) {
   if (mode == "pose-graph") {
     pipeline_ = std::make_unique<PoseGraphPipeline>();
+  } else if (mode == "chordal-init") {
+    pipeline_ = std::make_unique<ChordalInitPipeline>();
   } else if (mode == "ba") {
     pipeline_ = std::make_unique<BAPipeline>();
   } else {
-    throw std::invalid_argument("Unknown pipeline mode: " + mode +
-                                " (expected \"ba\" or \"pose-graph\")");
+    throw std::invalid_argument(
+        "Unknown pipeline mode: " + mode +
+        " (expected \"ba\", \"pose-graph\", or \"chordal-init\")");
   }
 }
 

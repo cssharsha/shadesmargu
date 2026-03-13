@@ -41,6 +41,9 @@ bool BAVisualizer::init(const VizConfig& config) {
               << std::endl;
   }
 
+  // BAL uses camera convention: X-right, Y-down, Z-forward (RDF)
+  impl_->rec->log_static("world", rerun::ViewCoordinates::RDF);
+
   return true;
 }
 

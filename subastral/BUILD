@@ -44,12 +44,29 @@ cc_library(
 )
 
 cc_library(
+    name = "chordal_init_pipeline",
+    srcs = ["chordal_init_pipeline.cpp"],
+    hdrs = ["chordal_init_pipeline.hpp"],
+    visibility = ["//visibility:public"],
+    deps = [
+        ":pipeline",
+        "//subastral/backend:backend",
+        "//subastral/backend/solver:lm_solver",
+        "//subastral/backend/solver:pose_graph_solver",
+        "//subastral/loader:g2o_loader",
+        "//viz/rerun:pg_visualizer",
+        "@eigen//:eigen",
+    ],
+)
+
+cc_library(
     name = "subastral_lib",
     srcs = ["subastral.cpp"],
     hdrs = ["subastral.hpp"],
     visibility = ["//visibility:public"],
     deps = [
         ":ba_pipeline",
+        ":chordal_init_pipeline",
         ":pipeline",
         ":pose_graph_pipeline",
     ],

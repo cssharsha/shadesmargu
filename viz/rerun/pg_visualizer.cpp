@@ -44,6 +44,9 @@ bool PGVisualizer::init(const VizConfig& config) {
               << std::endl;
   }
 
+  // Pose-graph uses z-up world convention
+  impl_->rec->log_static("world", rerun::ViewCoordinates::RIGHT_HAND_Z_UP);
+
   return true;
 }
 

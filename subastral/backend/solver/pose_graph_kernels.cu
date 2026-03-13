@@ -164,7 +164,8 @@ __global__ void accumulatePoseGraphHessianCSRKernel(
     int num_edges,
     int num_free_poses,
     double* d_csr_values,
-    double* d_b) {
+    double* d_b,
+    const double* __restrict__ d_weights) {
 
   int k = blockIdx.x * blockDim.x + threadIdx.x;
   if (k >= num_edges) return;
@@ -177,11 +178,18 @@ __global__ void accumulatePoseGraphHessianCSRKernel(
   const double* e = &d_residuals[k * RES_DIM];
   const double* Omega = &d_info_matrices[k * INFO_DIM];
 
-  // Precompute Ω · J_i, Ω · J_j, Ω · e
+  // IRLS weight: w_k * Omega scales the information matrix for robust loss.
+  // When d_weights is null (trivial loss), w_k = 1.0.
+  double w_k = (d_weights != nullptr) ? d_weights[k] : 1.0;
+
+  // Precompute w_k · Ω · J_i, w_k · Ω · J_j, w_k · Ω · e
+  double wOmega[36];
+  for (int i = 0; i < 36; ++i) wOmega[i] = w_k * Omega[i];
+
   double OJi[36], OJj[36], Oe[6];
-  mat6x6_mul(Omega, Ji, OJi);
-  mat6x6_mul(Omega, Jj, OJj);
-  mat6x6_vec(Omega, e, Oe);
+  mat6x6_mul(wOmega, Ji, OJi);
+  mat6x6_mul(wOmega, Jj, OJj);
+  mat6x6_vec(wOmega, e, Oe);
 
   // Block 0 = (ii): diagonal, lower triangle → c <= r
   if (var_i >= 0) {
@@ -328,6 +336,270 @@ __global__ void computePoseGraphCostKernel(
 }
 
 // =============================================================================
+// Kernel 13: Compute per-edge IRLS weight for robust loss
+// =============================================================================
+__global__ void computeEdgeWeightsKernel(
+    const double* __restrict__ d_residuals,
+    const double* __restrict__ d_info_matrices,
+    int num_edges,
+    gpu::LossType loss_type,
+    double loss_param,
+    double* d_weights) {
+
+  int k = blockIdx.x * blockDim.x + threadIdx.x;
+  if (k >= num_edges) return;
+
+  const double* e = &d_residuals[k * RES_DIM];
+  const double* Omega = &d_info_matrices[k * INFO_DIM];
+
+  // s = e^T * Omega * e (squared Mahalanobis distance)
+  // The robust kernel acts on the full Mahalanobis distance so that
+  // the loss-param threshold is in Mahalanobis units.
+  double Oe[6];
+  mat6x6_vec(Omega, e, Oe);
+  double s = 0.0;
+  for (int i = 0; i < 6; ++i) s += e[i] * Oe[i];
+
+  // Guard against negative, NaN, or Inf
+  if (s < 0.0 || isnan(s) || isinf(s)) {
+    d_weights[k] = 1.0;
+    return;
+  }
+
+  d_weights[k] = gpu::evalWeight(loss_type, s, loss_param);
+}
+
+// =============================================================================
+// Kernel 14: Compute per-edge robust cost
+// =============================================================================
+__global__ void computePoseGraphRobustCostKernel(
+    const double* __restrict__ d_residuals,
+    const double* __restrict__ d_info_matrices,
+    int num_edges,
+    gpu::LossType loss_type,
+    double loss_param,
+    double* d_costs) {
+
+  int k = blockIdx.x * blockDim.x + threadIdx.x;
+  if (k >= num_edges) return;
+
+  const double* e = &d_residuals[k * RES_DIM];
+  const double* Omega = &d_info_matrices[k * INFO_DIM];
+
+  // Robust cost = rho(e^T * Omega * e)
+  // Applied directly to the squared Mahalanobis distance.
+  double Oe[6];
+  mat6x6_vec(Omega, e, Oe);
+  double s = 0.0;
+  for (int i = 0; i < 6; ++i) s += e[i] * Oe[i];
+
+  // Guard against negative, NaN, or Inf
+  if (s < 0.0 || isnan(s) || isinf(s)) {
+    d_costs[k] = 0.0;
+    return;
+  }
+
+  d_costs[k] = gpu::evalRho(loss_type, s, loss_param);
+}
+
+// =============================================================================
+// Kernel 7: Symmetric SpMV — y = A * x (lower-triangle CSR)
+// =============================================================================
+//
+// Each thread handles one row. For each entry (i, j, val):
+//   - j == i (diagonal): y[i] += val * x[i]
+//   - j < i  (off-diag):  y[i] += val * x[j]  (direct)
+//                          y[j] += val * x[i]  (symmetric, atomicAdd)
+//
+// y MUST be zeroed before calling.
+//
+__global__ void symmetricSpMVKernel(
+    const int* __restrict__ row_ptr,
+    const int* __restrict__ col_ind,
+    const double* __restrict__ values,
+    const double* __restrict__ x,
+    double* y,
+    int num_rows) {
+
+  int i = blockIdx.x * blockDim.x + threadIdx.x;
+  if (i >= num_rows) return;
+
+  int start = row_ptr[i];
+  int end = row_ptr[i + 1];
+  double xi = x[i];
+  double yi = 0.0;
+
+  for (int idx = start; idx < end; ++idx) {
+    int j = col_ind[idx];
+    double val = values[idx];
+
+    if (j == i) {
+      // Diagonal: count once
+      yi += val * xi;
+    } else {
+      // Off-diagonal (j < i since lower triangle): symmetric contribution
+      yi += val * x[j];
+      atomicAdd(&y[j], val * xi);
+    }
+  }
+
+  // Accumulate the direct contribution (may overlap with atomic writes
+  // from other threads to y[i], so use atomicAdd)
+  atomicAdd(&y[i], yi);
+}
+
+// =============================================================================
+// Kernel 8: Extract and invert 6x6 diagonal blocks
+// =============================================================================
+//
+// Each thread handles one free pose. Extracts the 6x6 diagonal block from
+// the CSR values using diag_offsets, then inverts it via Gauss-Jordan
+// elimination with partial pivoting.
+//
+// The diagonal block for pose p has a special structure in the lower-triangle
+// CSR: row r of the block stores columns 0..r (lower triangle of the block).
+// We reconstruct the full symmetric 6x6 block before inverting.
+//
+__global__ void extractAndInvertDiagBlocksKernel(
+    const double* __restrict__ csr_values,
+    const int* __restrict__ diag_offsets,
+    int num_free_poses,
+    double* inv_blocks) {
+
+  int p = blockIdx.x * blockDim.x + threadIdx.x;
+  if (p >= num_free_poses) return;
+
+  // Extract the full symmetric 6x6 block from lower-triangle CSR
+  double A[36];  // row-major 6x6
+
+  for (int r = 0; r < 6; ++r) {
+    int off = diag_offsets[p * 6 + r];
+    // Lower triangle: columns 0..r are stored at csr_values[off + c]
+    for (int c = 0; c <= r; ++c) {
+      double val = csr_values[off + c];
+      A[r * 6 + c] = val;
+      A[c * 6 + r] = val;  // symmetric
+    }
+  }
+
+  // Gauss-Jordan elimination with partial pivoting to compute A^{-1}
+  // Augmented matrix [A | I] stored as A (in-place) and inv (identity)
+  double inv[36];
+  for (int i = 0; i < 36; ++i) inv[i] = 0.0;
+  for (int i = 0; i < 6; ++i) inv[i * 6 + i] = 1.0;
+
+  for (int col = 0; col < 6; ++col) {
+    // Partial pivoting: find row with largest absolute value in column
+    int pivot_row = col;
+    double max_val = fabs(A[col * 6 + col]);
+    for (int row = col + 1; row < 6; ++row) {
+      double val = fabs(A[row * 6 + col]);
+      if (val > max_val) {
+        max_val = val;
+        pivot_row = row;
+      }
+    }
+
+    // Swap rows if needed
+    if (pivot_row != col) {
+      for (int k = 0; k < 6; ++k) {
+        double tmp = A[col * 6 + k];
+        A[col * 6 + k] = A[pivot_row * 6 + k];
+        A[pivot_row * 6 + k] = tmp;
+
+        tmp = inv[col * 6 + k];
+        inv[col * 6 + k] = inv[pivot_row * 6 + k];
+        inv[pivot_row * 6 + k] = tmp;
+      }
+    }
+
+    // Scale pivot row
+    double pivot = A[col * 6 + col];
+    if (fabs(pivot) < 1e-30) {
+      // Singular block — set inverse to identity as fallback
+      for (int i = 0; i < 36; ++i) inv[i] = 0.0;
+      for (int i = 0; i < 6; ++i) inv[i * 6 + i] = 1.0;
+      break;
+    }
+
+    double inv_pivot = 1.0 / pivot;
+    for (int k = 0; k < 6; ++k) {
+      A[col * 6 + k] *= inv_pivot;
+      inv[col * 6 + k] *= inv_pivot;
+    }
+
+    // Eliminate column in all other rows
+    for (int row = 0; row < 6; ++row) {
+      if (row == col) continue;
+      double factor = A[row * 6 + col];
+      for (int k = 0; k < 6; ++k) {
+        A[row * 6 + k] -= factor * A[col * 6 + k];
+        inv[row * 6 + k] -= factor * inv[col * 6 + k];
+      }
+    }
+  }
+
+  // Store result
+  for (int i = 0; i < 36; ++i) {
+    inv_blocks[p * 36 + i] = inv[i];
+  }
+}
+
+// =============================================================================
+// Kernel 9: Apply block-diagonal preconditioner — z = M^{-1} * r
+// =============================================================================
+__global__ void applyBlockPreconditionerKernel(
+    const double* __restrict__ inv_blocks,
+    const double* __restrict__ r_vec,
+    int num_free_poses,
+    double* z) {
+
+  int p = blockIdx.x * blockDim.x + threadIdx.x;
+  if (p >= num_free_poses) return;
+
+  const double* M_inv = &inv_blocks[p * 36];
+  const double* r = &r_vec[p * 6];
+  double* zp = &z[p * 6];
+
+  for (int i = 0; i < 6; ++i) {
+    double sum = 0.0;
+    for (int j = 0; j < 6; ++j) {
+      sum += M_inv[i * 6 + j] * r[j];
+    }
+    zp[i] = sum;
+  }
+}
+
+// =============================================================================
+// Kernel 10: axpy — y = alpha * x + y
+// =============================================================================
+__global__ void axpyKernel(double alpha, const double* __restrict__ x,
+                           double* y, int n) {
+  int i = blockIdx.x * blockDim.x + threadIdx.x;
+  if (i >= n) return;
+  y[i] += alpha * x[i];
+}
+
+// =============================================================================
+// Kernel 11: xpby — y = x + beta * y
+// =============================================================================
+__global__ void xpbyKernel(const double* __restrict__ x, double beta,
+                           double* y, int n) {
+  int i = blockIdx.x * blockDim.x + threadIdx.x;
+  if (i >= n) return;
+  y[i] = x[i] + beta * y[i];
+}
+
+// =============================================================================
+// Kernel 12: negate — y = -x
+// =============================================================================
+__global__ void negateKernel(const double* __restrict__ x, double* y, int n) {
+  int i = blockIdx.x * blockDim.x + threadIdx.x;
+  if (i >= n) return;
+  y[i] = -x[i];
+}
+
+// =============================================================================
 // Host wrappers
 // =============================================================================
 
@@ -356,11 +628,12 @@ void launchAccumulatePoseGraphHessianCSR(
     const int* d_edge_var_i, const int* d_edge_var_j,
     const int* d_block_offsets,
     int num_edges, int num_free_poses,
-    double* d_csr_values, double* d_b) {
+    double* d_csr_values, double* d_b,
+    const double* d_weights) {
   accumulatePoseGraphHessianCSRKernel<<<gridSize(num_edges), BLOCK_SIZE>>>(
       d_residuals, d_J_i, d_J_j, d_info_matrices,
       d_edge_var_i, d_edge_var_j, d_block_offsets,
-      num_edges, num_free_poses, d_csr_values, d_b);
+      num_edges, num_free_poses, d_csr_values, d_b, d_weights);
 }
 
 void launchApplyPoseGraphDampingCSR(
@@ -384,6 +657,57 @@ void launchComputePoseGraphCost(
     int num_edges, double* d_costs) {
   computePoseGraphCostKernel<<<gridSize(num_edges), BLOCK_SIZE>>>(
       d_residuals, d_info_matrices, num_edges, d_costs);
+}
+
+void launchComputeEdgeWeights(
+    const double* d_residuals, const double* d_info_matrices,
+    int num_edges, gpu::LossType loss_type, double loss_param,
+    double* d_weights) {
+  computeEdgeWeightsKernel<<<gridSize(num_edges), BLOCK_SIZE>>>(
+      d_residuals, d_info_matrices, num_edges, loss_type, loss_param,
+      d_weights);
+}
+
+void launchComputePoseGraphRobustCost(
+    const double* d_residuals, const double* d_info_matrices,
+    int num_edges, gpu::LossType loss_type, double loss_param,
+    double* d_costs) {
+  computePoseGraphRobustCostKernel<<<gridSize(num_edges), BLOCK_SIZE>>>(
+      d_residuals, d_info_matrices, num_edges, loss_type, loss_param,
+      d_costs);
+}
+
+void launchSymmetricSpMV(
+    const int* d_row_ptr, const int* d_col_ind, const double* d_values,
+    const double* d_x, double* d_y, int num_rows) {
+  symmetricSpMVKernel<<<gridSize(num_rows), BLOCK_SIZE>>>(
+      d_row_ptr, d_col_ind, d_values, d_x, d_y, num_rows);
+}
+
+void launchExtractAndInvertDiagBlocks(
+    const double* d_csr_values, const int* d_diag_offsets,
+    int num_free_poses, double* d_inv_blocks) {
+  extractAndInvertDiagBlocksKernel<<<gridSize(num_free_poses), BLOCK_SIZE>>>(
+      d_csr_values, d_diag_offsets, num_free_poses, d_inv_blocks);
+}
+
+void launchApplyBlockPreconditioner(
+    const double* d_inv_blocks, const double* d_r,
+    int num_free_poses, double* d_z) {
+  applyBlockPreconditionerKernel<<<gridSize(num_free_poses), BLOCK_SIZE>>>(
+      d_inv_blocks, d_r, num_free_poses, d_z);
+}
+
+void launchAxpy(double alpha, const double* d_x, double* d_y, int n) {
+  axpyKernel<<<gridSize(n), BLOCK_SIZE>>>(alpha, d_x, d_y, n);
+}
+
+void launchXpby(const double* d_x, double beta, double* d_y, int n) {
+  xpbyKernel<<<gridSize(n), BLOCK_SIZE>>>(d_x, beta, d_y, n);
+}
+
+void launchNegate(const double* d_x, double* d_y, int n) {
+  negateKernel<<<gridSize(n), BLOCK_SIZE>>>(d_x, d_y, n);
 }
 
 }  // namespace pg_gpu
