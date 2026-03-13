@@ -52,3 +52,9 @@ build --features=use_header_modules
 
 # Define the custom flag with a default value of false
 build --define=enable_debug_logs=false
+
+# Coverage configuration
+# System gcov is replaced with llvm-cov-14 wrapper in Dockerfile
+# (gcc's gcov segfaults on clang-produced .gcno files)
+coverage --combined_report=lcov
+coverage --instrumentation_filter="//subastral[/:]"

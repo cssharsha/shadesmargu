@@ -1,0 +1,117 @@
+# Buildkite CI Pipeline for Shadesmar (GPU-Accelerated SLAM)
+#
+# Runs on a self-hosted agent with NVIDIA GPU access.
+# The agent executes commands inside the project's CUDA Docker container
+# via `docker compose exec`.
+#
+# Uses project name "shadesmar_ci" to avoid collisions with the local dev
+# container ("shadesmar_dev" in the Makefile).
+#
+# The CI compose override (docker-compose.ci.yml) runs the container as the
+# host user's UID so all files in /workspace are owned by buildkite-agent.
+# This eliminates permission errors during checkout cleanup.
+#
+# Triggered on: pull requests, pushes to main
+
+env:
+  COMPOSE_FILES: -f docker/docker-compose.yml -f docker/docker-compose.ci.yml
+  COMPOSE: docker compose -p shadesmar_ci $COMPOSE_FILES
+  EXEC: docker compose -p shadesmar_ci $COMPOSE_FILES exec -w /workspace
+  SERVICE: shadesmar_gu
+
+steps:
+  # ------------------------------------------------------------------
+  # Step 1: Build
+  # ------------------------------------------------------------------
+  - label: ":hammer: Build"
+    key: build
+    command: |
+      echo "--- :docker: Ensuring container is running"
+      export HOST_UID=$$(id -u)
+      export HOST_GID=$$(id -g)
+      $${COMPOSE} up -d --build
+
+      echo "--- :bazel: Building all targets"
+      $${EXEC} -T $${SERVICE} \
+        bazel build --config=cuda //subastral/...
+
+      echo "--- :bazel: Building visualization targets"
+      $${EXEC} -T $${SERVICE} \
+        bazel build --config=cuda //viz/...
+    timeout_in_minutes: 30
+    agents:
+      queue: "arch-sh"
+
+  # ------------------------------------------------------------------
+  # Step 2: Unit Tests
+  # ------------------------------------------------------------------
+  - label: ":test_tube: Unit Tests"
+    key: test
+    depends_on: build
+    command: |
+      echo "--- :bazel: Running all tests"
+      $${EXEC} -T $${SERVICE} \
+        bazel test --config=cuda \
+          --test_output=all \
+          --test_timeout=300 \
+          //subastral/...
+
+      echo "--- :bazel: Running third-party sanity tests"
+      $${EXEC} -T $${SERVICE} \
+        bazel test --config=cuda \
+          --test_output=all \
+          //third_party/tests/...
+    timeout_in_minutes: 30
+    agents:
+      queue: "arch-sh"
+    artifact_paths:
+      - "bazel-testlogs/**/test.log"
+      - "bazel-testlogs/**/test.xml"
+
+  # ------------------------------------------------------------------
+  # Step 3: Code Coverage
+  # ------------------------------------------------------------------
+  - label: ":bar_chart: Code Coverage"
+    key: coverage
+    depends_on: build
+    command: |
+      echo "--- :bazel: Running coverage (CPU-compiled targets only)"
+      $${EXEC} -T $${SERVICE} \
+        bazel coverage --config=cuda \
+          --combined_report=lcov \
+          --instrumentation_filter="//subastral[/:]" \
+          -- //subastral/backend:common_test \
+             //subastral/backend:jacobian_test \
+             //subastral/backend/lie:so3_test \
+             //subastral/backend/lie:se3_test \
+             //subastral/backend/solver:lm_solver_test \
+             //subastral/backend/solver:schur_test \
+             //subastral/backend/solver:loss_function_test \
+             //subastral/loader:g2o_loader_test
+
+      echo "--- :page_facing_up: Generating coverage report"
+      $${EXEC} -T $${SERVICE} \
+        /workspace/scripts/generate_coverage_report.sh
+    timeout_in_minutes: 20
+    agents:
+      queue: "arch-sh"
+    artifact_paths:
+      - "coverage_report/**/*"
+      - "coverage.lcov"
+
+  # ------------------------------------------------------------------
+  # Step 4: Cleanup — stop CI container
+  # ------------------------------------------------------------------
+  - label: ":broom: Cleanup"
+    depends_on:
+      - step: test
+        allow_failure: true
+      - step: coverage
+        allow_failure: true
+    allow_dependency_failure: true
+    command: |
+      echo "--- :docker: Stopping CI container"
+      $${COMPOSE} down || true
+    timeout_in_minutes: 5
+    agents:
+      queue: "arch-sh"

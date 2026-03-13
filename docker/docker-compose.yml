@@ -1,5 +1,5 @@
 services:
-  slam_course:
+  shadesmar_gu:
     build:
       context: ..
       dockerfile: docker/Dockerfile

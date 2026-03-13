@@ -1,4 +1,4 @@
-workspace(name = "slam_course")
+workspace(name = "shadesmar_gu")
 
 load("@bazel_tools//tools/build_defs/repo:http.bzl", "http_archive")
 

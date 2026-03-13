@@ -1,0 +1,23 @@
+# CI override — run the container as the host user (buildkite-agent) so all
+# files created inside /workspace are owned by the agent's UID/GID.
+# This eliminates checkout permission errors without needing chown or hooks.
+#
+# Usage: docker compose -f docker/docker-compose.yml -f docker/docker-compose.ci.yml up -d
+services:
+  shadesmar_gu:
+    # Run as the host user's UID/GID (set by the shell at compose-up time).
+    user: "${HOST_UID:-1000}:${HOST_GID:-1000}"
+    # Use /tmp/ci-home as HOME so the arbitrary UID can write caches.
+    # /tmp is world-writable, so no volume ownership issues.
+    environment:
+      - HOME=/tmp/ci-home
+      - USER=ci
+    volumes:
+      - ..:/workspace
+      - /tmp/.X11-unix:/tmp/.X11-unix
+      - /data:/data
+    entrypoint: >
+      /bin/bash -c "
+        mkdir -p /tmp/ci-home/.cache/bazel /tmp/ci-home/.cache/bazelisk /tmp/ci-home/.cache/go-build &&
+        exec sleep infinity
+      "

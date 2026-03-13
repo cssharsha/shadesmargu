@@ -1,26 +1,89 @@
-.PHONY: all compile_commands build run docker clean
+.PHONY: all compile_commands build run docker clean coverage setup-ci setup-ci-ssh clean-ci
+
+COMPOSE := docker compose -p shadesmar_dev -f docker/docker-compose.yml
+SERVICE := shadesmar_gu
 
 all: build
 
 clean:
-	docker compose -f docker/docker-compose.yml exec slam_course bazel clean --expunge
+	$(COMPOSE) exec $(SERVICE) bazel clean --expunge
 
 compile_commands:
-	docker compose -f docker/docker-compose.yml exec slam_course bazel run @hedron_compile_commands//:refresh_all
+	$(COMPOSE) exec $(SERVICE) bazel run @hedron_compile_commands//:refresh_all
 	sed -i 's|"directory": "/workspace"|"directory": "$(CURDIR)"|g' compile_commands.json
-	./generate_clangd_config.sh
+	./scripts/generate_clangd_config.sh
 
 build:
-	docker compose -f docker/docker-compose.yml exec slam_course bazel build --config=cuda $(TARGET)
+	$(COMPOSE) exec $(SERVICE) bazel build --config=cuda $(TARGET)
 
 test:
-	docker compose -f docker/docker-compose.yml exec slam_course bazel test --config=cuda $(if $(TARGET),$(TARGET),//...)
+	$(COMPOSE) exec $(SERVICE) bazel test --config=cuda $(if $(TARGET),$(TARGET),//...)
 
 run:
-	docker compose -f docker/docker-compose.yml exec slam_course bazel run --config=cuda $(TARGET) -- $(ARGS)
+	$(COMPOSE) exec $(SERVICE) bazel run --config=cuda $(TARGET) -- $(ARGS)
+
+coverage:
+	$(COMPOSE) exec $(SERVICE) bazel coverage --config=cuda \
+		-- //subastral/backend:common_test \
+		   //subastral/backend:jacobian_test \
+		   //subastral/backend/lie:so3_test \
+		   //subastral/backend/lie:se3_test \
+		   //subastral/backend/solver:lm_solver_test \
+		   //subastral/backend/solver:schur_test \
+		   //subastral/backend/solver:loss_function_test \
+		   //subastral/loader:g2o_loader_test
+	@echo ""
+	@echo "=== Generating HTML report ==="
+	$(COMPOSE) exec $(SERVICE) bash -c ' \
+		LCOV_FILE="$$(bazel info output_path)/_coverage/_coverage_report.dat"; \
+		if [ -f "$$LCOV_FILE" ]; then \
+			genhtml "$$LCOV_FILE" \
+				--output-directory /workspace/coverage_report \
+				--title "Shadesmar Coverage" \
+				--legend 2>/dev/null; \
+			echo ""; \
+			lcov --summary "$$LCOV_FILE" 2>&1; \
+			echo ""; \
+			echo "HTML report: coverage_report/index.html"; \
+		else \
+			echo "No coverage report found"; \
+		fi'
 
 docker:
-	docker compose -f docker/docker-compose.yml up -d --build
+	$(COMPOSE) up -d --build
+
+setup-ci:
+	@./scripts/setup_buildkite_agent.sh
+
+setup-ci-ssh:
+	@echo "=== Copying SSH keys to buildkite-agent user ==="
+	@SSH_KEY=$$(ls ~/.ssh/id_ed25519 2>/dev/null || ls ~/.ssh/id_rsa 2>/dev/null) && \
+	if [ -z "$$SSH_KEY" ]; then \
+		echo "Error: No SSH key found at ~/.ssh/id_ed25519 or ~/.ssh/id_rsa"; \
+		exit 1; \
+	fi && \
+	echo "Found SSH key: $$SSH_KEY" && \
+	sudo mkdir -p /var/lib/buildkite-agent/.ssh && \
+	sudo cp "$$SSH_KEY" /var/lib/buildkite-agent/.ssh/ && \
+	sudo cp "$$SSH_KEY.pub" /var/lib/buildkite-agent/.ssh/ 2>/dev/null || true && \
+	sudo chown -R buildkite-agent:buildkite-agent /var/lib/buildkite-agent/.ssh && \
+	sudo chmod 700 /var/lib/buildkite-agent/.ssh && \
+	sudo chmod 600 /var/lib/buildkite-agent/.ssh/$$(basename $$SSH_KEY) && \
+	echo "SSH key copied to buildkite-agent user" && \
+	echo "Restarting buildkite-agent..." && \
+	sudo systemctl restart buildkite-agent && \
+	echo "Done. Retrigger the build from the Buildkite dashboard."
+
+clean-ci:
+	@echo "=== Fixing buildkite-agent home directory ==="
+	@sudo rm -rf /var/lib/buildkite-agent/.gitconfig
+	@echo -e "[init]\n\tdefaultBranch = main" | sudo tee /var/lib/buildkite-agent/.gitconfig > /dev/null
+	@sudo chown buildkite-agent:buildkite-agent /var/lib/buildkite-agent/.gitconfig
+	@echo "=== Clearing stale builds ==="
+	@sudo rm -rf /var/lib/buildkite-agent/.buildkite-agent/builds/*
+	@echo "=== Restarting agent ==="
+	@sudo systemctl restart buildkite-agent
+	@echo "Done. Retrigger the build from the Buildkite dashboard."
 
 docker-clean:
-	docker compose -f docker/docker-compose.yml down
+	$(COMPOSE) down

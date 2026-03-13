@@ -55,7 +55,8 @@ RUN apt-get update && apt-get -y install \
     libboost-all-dev \
     libopencv-dev \
     libeigen3-dev \
-    gdb
+    gdb \
+    lcov
 
 # Add GTSAM PPA and install GTSAM
 RUN add-apt-repository ppa:borglab/gtsam-release-4.2 \
@@ -63,6 +64,27 @@ RUN add-apt-repository ppa:borglab/gtsam-release-4.2 \
     && apt-get install -y \
     libgtsam-dev \
     libgtsam-unstable-dev
+
+# ===========================================================================
+# llvm-cov gcov wrapper for Bazel coverage (clang produces gcno files
+# incompatible with gcc's gcov — this wrapper delegates to llvm-cov)
+# ===========================================================================
+# Replace system gcov with llvm-cov wrapper so Bazel coverage works with clang.
+# gcc's gcov segfaults on clang-produced .gcno files (version mismatch).
+RUN printf '#!/bin/sh\nexec llvm-cov-14 gcov "$@"\n' > /usr/local/bin/llvm-gcov.sh \
+    && chmod +x /usr/local/bin/llvm-gcov.sh \
+    && ln -sf /usr/local/bin/llvm-gcov.sh /usr/local/bin/llvm-gcov \
+    && dpkg-divert --local --rename --add /usr/bin/gcov \
+    && ln -sf /usr/local/bin/llvm-gcov.sh /usr/bin/gcov
+
+# ===========================================================================
+# Bazelisk → /usr/local/bin/bazel
+# ===========================================================================
+RUN set -eux; \
+    curl -fSL -o /usr/local/bin/bazel \
+        https://github.com/bazelbuild/bazelisk/releases/download/v1.25.0/bazelisk-linux-amd64; \
+    chmod +x /usr/local/bin/bazel; \
+    bazel --version || true
 
 # ===========================================================================
 # Rerun C++ SDK v0.30.2 — built from source with static Arrow
@@ -107,5 +129,8 @@ RUN groupadd --gid $USER_GID $USERNAME \
     && echo $USERNAME ALL=\(root\) NOPASSWD:ALL > /etc/sudoers.d/$USERNAME
 
 USER $USERNAME
+
+# Ensure bazelisk cache dir exists and is writable by developer
+RUN mkdir -p /home/$USERNAME/.cache/bazelisk /home/$USERNAME/.cache/bazel
 
 WORKDIR /workspace

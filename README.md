@@ -72,6 +72,60 @@ All 13 test targets (109 individual tests) cover:
 - Loss functions: Trivial, Huber, Cauchy properties (14 tests)
 - Data structures: Camera, Point, Observation memory layout (4 tests)
 
+### Code Coverage
+
+```bash
+make coverage
+```
+
+Generates an lcov HTML report at `coverage_report/index.html`. Coverage is collected
+from CPU-compiled test targets only (CUDA `.cu` files compiled by nvcc do not produce
+gcov data). Covered targets: common, jacobian, SO(3), SE(3), LM solver, Schur, loss
+functions, g2o loader.
+
+## CI
+
+Uses [Buildkite](https://buildkite.com) with a self-hosted agent for GPU-accelerated
+CI. The agent runs on your LAN — only outbound HTTPS connections to Buildkite's control
+plane, no inbound ports exposed.
+
+### Pipeline
+
+The pipeline (`.buildkite/pipeline.yml`) runs on every PR:
+
+1. **Build** — `bazel build --config=cuda //subastral/... //viz/...`
+2. **Unit Tests** — `bazel test --config=cuda //subastral/... //third_party/tests/...`
+3. **Code Coverage** — `bazel coverage` on CPU test targets, generates lcov HTML report
+
+Test logs and coverage reports are uploaded as Buildkite artifacts.
+
+### Agent Setup
+
+To set up the Buildkite agent on your GPU machine:
+
+```bash
+# 1. Sign up at buildkite.com, create an organization, connect GitHub repo
+# 2. Create a pipeline pointing to this repo, set it to read .buildkite/pipeline.yml
+
+# 3. Install the agent (Ubuntu)
+sudo sh -c 'echo deb https://apt.buildkite.com/buildkite-agent stable main > /etc/apt/sources.list.d/buildkite-agent.list'
+sudo apt-key adv --keyserver hkp://keyserver.ubuntu.com:80 --recv-keys 32A37959C2FA5C3C99EFBC32A79206696452D198
+sudo apt-get update && sudo apt-get install -y buildkite-agent
+
+# 4. Configure with your agent token (from Buildkite dashboard)
+sudo sed -i "s/xxx/YOUR_AGENT_TOKEN/g" /etc/buildkite-agent/buildkite-agent.cfg
+
+# 5. Set the agent queue tag to match the pipeline
+echo 'tags="queue=gpu"' | sudo tee -a /etc/buildkite-agent/buildkite-agent.cfg
+
+# 6. Start the agent
+sudo systemctl enable buildkite-agent && sudo systemctl start buildkite-agent
+```
+
+The agent needs: Docker, Docker Compose, NVIDIA Container Toolkit, and access to the
+GPU. It will execute pipeline commands which use `docker compose exec` to run Bazel
+inside the project's CUDA container.
+
 ## Architecture
 
 ### Phases Completed
@@ -275,6 +329,7 @@ viz/rerun/
 - [x] Phase 5: Pose-Graph SLAM (GPU sparse Cholesky, g2o loader, Rerun visualization)
 - [x] Rerun Integration (3D visualization for BA and pose-graph)
 - [x] Pipeline Refactoring (Strategy pattern for BA / Pose-Graph)
+- [x] Buildkite CI (self-hosted GPU agent, unit tests + code coverage on PRs)
 - [ ] PCG Solver — cubicle/rim fail because `cusolverSpDcsrlsvchol` requires SPD; PCG handles indefinite systems and avoids O(n^3) factorization bottleneck on large graphs
 - [ ] Robust Loss for Pose-Graph — Huber/Cauchy IRLS is implemented for BA but not wired into pose-graph; outlier loop closures can corrupt the solution
 - [ ] Sparse LDL^T Factorization — direct-solve alternative to PCG for non-SPD Hessians (cubicle/rim datasets)
@@ -285,6 +340,7 @@ viz/rerun/
 - [ ] Phase 7: Incremental SLAM — online graph construction with sliding window or iSAM2-style incremental updates for real-time operation
 - [ ] Phase 8: ROS Integration
 - [ ] GPU Profiling & Optimization — Nsight profiling, optimize CSR assembly, reduce host-device transfers, benchmark against g2o/GTSAM
+- [ ] Branch Coverage — Bazel's LcovMerger doesn't parse llvm-cov intermediate branch format (`taken`/`nottaken`); needs lcov 2.0+ or switch to LLVM native coverage (`-fprofile-instr-generate`)
 
 ---
 

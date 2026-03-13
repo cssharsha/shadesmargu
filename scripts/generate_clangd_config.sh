@@ -6,12 +6,13 @@
 set -e
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-cd "$SCRIPT_DIR"
+PROJECT_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
+cd "$PROJECT_ROOT"
 
 echo "Generating .clangd config from container paths..."
 
 # Run the discovery script inside the container
-docker compose -f docker/docker-compose.yml exec -T slam_course bash /workspace/docker/generate_clangd_config.sh > /tmp/clangd_includes_raw.txt
+docker compose -f docker/docker-compose.yml exec -T shadesmar_gu bash /workspace/docker/generate_clangd_config.sh > /tmp/clangd_includes_raw.txt
 
 # Parse the output and convert container paths to host paths
 BAZEL_EXTERNAL=""
@@ -42,7 +43,7 @@ echo "Found ${#SYSTEM_PATHS[@]} system paths"
 
 # Fix bazel-out symlink on host
 BAZEL_OUTPUT_BASE="$(dirname "$BAZEL_EXTERNAL")"
-BAZEL_OUT_HOST="$BAZEL_OUTPUT_BASE/execroot/slam_course/bazel-out"
+BAZEL_OUT_HOST="$BAZEL_OUTPUT_BASE/execroot/shadesmar_gu/bazel-out"
 if [ -d "$BAZEL_OUT_HOST" ]; then
     echo "Updating bazel-out symlink to: $BAZEL_OUT_HOST"
     rm -f bazel-out
@@ -90,8 +91,8 @@ for system_path in "${SYSTEM_PATHS[@]}"; do
              if [ ! -d "$LOCAL_CACHE" ]; then
                  echo "System path $system_path not found on host. Attempting to copy from container..."
                  mkdir -p "$CACHE_DIR"
-                 if docker compose -f docker/docker-compose.yml ps -q slam_course > /dev/null; then
-                     CONTAINER_ID=$(docker compose -f docker/docker-compose.yml ps -q slam_course)
+                 if docker compose -f docker/docker-compose.yml ps -q shadesmar_gu > /dev/null; then
+                     CONTAINER_ID=$(docker compose -f docker/docker-compose.yml ps -q shadesmar_gu)
                      if [[ "$BASE_NAME" == "rerun_sdk" ]]; then
                          # Copy the include dir contents into cache/rerun_sdk/
                          docker cp "${CONTAINER_ID}:${system_path}" "$LOCAL_CACHE"
@@ -111,11 +112,11 @@ for system_path in "${SYSTEM_PATHS[@]}"; do
              if [ -d "$LOCAL_CACHE" ]; then
                  # Special handling for GTSAM to allow <gtsam/...> includes
                  if [[ "$BASE_NAME" == "gtsam" ]]; then
-                     echo "    - -I$SCRIPT_DIR/$CACHE_DIR" >> .clangd
-                     echo "  Adding cached system path (parent): $SCRIPT_DIR/$CACHE_DIR"
+                     echo "    - -I$PROJECT_ROOT/$CACHE_DIR" >> .clangd
+                     echo "  Adding cached system path (parent): $PROJECT_ROOT/$CACHE_DIR"
                  else
-                     echo "    - -I$SCRIPT_DIR/$LOCAL_CACHE" >> .clangd
-                     echo "  Adding cached system path: $SCRIPT_DIR/$LOCAL_CACHE"
+                     echo "    - -I$PROJECT_ROOT/$LOCAL_CACHE" >> .clangd
+                     echo "  Adding cached system path: $PROJECT_ROOT/$LOCAL_CACHE"
                  fi
                  found=true
              fi
@@ -151,14 +152,14 @@ if [ ! -d ".cache/cuda/include" ]; then
     mkdir -p .cache/cuda
     
     # Check if container is running
-    if docker compose -f docker/docker-compose.yml ps -q slam_course > /dev/null; then
+    if docker compose -f docker/docker-compose.yml ps -q shadesmar_gu > /dev/null; then
         # Try to find CUDA include path in container
-        CUDA_INCLUDE_PATH=$(docker compose -f docker/docker-compose.yml exec -T slam_course readlink -f /usr/local/cuda/include 2>/dev/null || echo "")
+        CUDA_INCLUDE_PATH=$(docker compose -f docker/docker-compose.yml exec -T shadesmar_gu readlink -f /usr/local/cuda/include 2>/dev/null || echo "")
         
         if [ -n "$CUDA_INCLUDE_PATH" ]; then
             echo "Found CUDA in container at $CUDA_INCLUDE_PATH"
             # Get the container ID
-            CONTAINER_ID=$(docker compose -f docker/docker-compose.yml ps -q slam_course)
+            CONTAINER_ID=$(docker compose -f docker/docker-compose.yml ps -q shadesmar_gu)
             
             # Copy headers
             docker cp "${CONTAINER_ID}:${CUDA_INCLUDE_PATH}" .cache/cuda/
@@ -181,14 +182,14 @@ fi
 # Add local CUDA cache if it exists
 if [ -d ".cache/cuda/include" ]; then
 
-    echo "    - -I$SCRIPT_DIR/.cache/cuda/include
-    - -I$SCRIPT_DIR
-    - --cuda-path=$SCRIPT_DIR/.cache/cuda
+    echo "    - -I$PROJECT_ROOT/.cache/cuda/include
+    - -I$PROJECT_ROOT
+    - --cuda-path=$PROJECT_ROOT/.cache/cuda
     - -nocudalib
     - -nocudainc
     - -x
     - c++" >> .clangd
-    echo "  Adding local CUDA cache: $SCRIPT_DIR/.cache/cuda/include"
+    echo "  Adding local CUDA cache: $PROJECT_ROOT/.cache/cuda/include"
 fi
 
 # Complete the config
