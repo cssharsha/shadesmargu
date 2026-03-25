@@ -4,6 +4,7 @@
 #include <algorithm>
 #include <chrono>
 #include <cmath>
+#include <fstream>
 #include <iomanip>
 #include <iostream>
 #include <opencv2/calib3d.hpp>
@@ -12,6 +13,7 @@
 
 #include "subastral/frontend/feature_extractor_cpu.hpp"
 #include "subastral/frontend/feature_matcher_cpu.hpp"
+#include "subastral/loader/euroc_loader.h"
 #include "subastral/loader/tum_loader.h"
 
 namespace substral {
@@ -57,10 +59,22 @@ VisualFrontendPipeline::VisualFrontendPipeline() {
 }
 
 bool VisualFrontendPipeline::load(const std::string& sequence_dir) {
-  loader::TUMLoader loader;
-  if (!loader.load(sequence_dir)) return false;
-  dataset_ = loader.dataset();
-  loader.printStats();
+  // Auto-detect dataset format from directory contents
+  std::ifstream mav0_check(sequence_dir + "/mav0/cam0/data.csv");
+  if (mav0_check.good()) {
+    // EuRoC / TUM-VI format
+    mav0_check.close();
+    loader::EuRoCLoader loader;
+    if (!loader.load(sequence_dir)) return false;
+    dataset_ = loader.dataset();
+    loader.printStats();
+  } else {
+    // TUM RGB-D format
+    loader::TUMLoader loader;
+    if (!loader.load(sequence_dir)) return false;
+    dataset_ = loader.dataset();
+    loader.printStats();
+  }
 
   // Auto-detect available sensors
   sensor_config_.has_depth = !dataset_.depth_frames.empty();
@@ -123,10 +137,11 @@ bool VisualFrontendPipeline::initializeFromDepth(
     int frame_idx, rerun_viz::VFEVisualizer* /*viz*/) {
   std::string rgb_path =
       dataset_.base_path + "/" + dataset_.rgb_frames[frame_idx].relative_path;
-  cv::Mat img = cv::imread(rgb_path, cv::IMREAD_GRAYSCALE);
-  if (img.empty()) return false;
+  cv::Mat img_gray = cv::imread(rgb_path, cv::IMREAD_GRAYSCALE);
+  cv::Mat img_color = cv::imread(rgb_path, cv::IMREAD_COLOR);
+  if (img_gray.empty()) return false;
 
-  auto result = extractor_->extract(img);
+  auto result = extractor_->extract(img_gray);
   if (result.keypoints.size() < 50) return false;
 
   std::string depth_path = findAssociatedDepthPath(frame_idx);
@@ -143,8 +158,8 @@ bool VisualFrontendPipeline::initializeFromDepth(
   frame.descriptors = std::move(result.descriptors);
   frame.T_world_camera = tf_tree_->lookup("world", "optical");
 
-  int n_points =
-      depth_init_.initialize(frame, depth_path, dataset_.intrinsics, map_);
+  int n_points = depth_init_.initialize(frame, depth_path, dataset_.intrinsics,
+                                        map_, img_color);
 
   if (n_points < 50) {
     std::cerr << "  Depth init: only " << n_points
@@ -199,6 +214,7 @@ bool VisualFrontendPipeline::initialize(int idx1, int idx2,
 
   cv::Mat img1 = cv::imread(path1, cv::IMREAD_GRAYSCALE);
   cv::Mat img2 = cv::imread(path2, cv::IMREAD_GRAYSCALE);
+  cv::Mat img1_color = cv::imread(path1, cv::IMREAD_COLOR);
   if (img1.empty() || img2.empty()) return false;
 
   auto r1 = extractor_->extract(img1);
@@ -253,8 +269,18 @@ bool VisualFrontendPipeline::initialize(int idx1, int idx2,
     int kp2 = matches[mi].trainIdx;
 
     Eigen::Vector3d p_world = R_wc1 * tvr.points_3d[i] + t_wc1;
+    uint8_t cr = 128, cg = 128, cb = 128;
+    if (!img1_color.empty()) {
+      const auto& pt = f1.keypoints[kp1].pt;
+      int pu = static_cast<int>(std::round(pt.x));
+      int pv = static_cast<int>(std::round(pt.y));
+      if (pu >= 0 && pu < img1_color.cols && pv >= 0 && pv < img1_color.rows) {
+        cv::Vec3b bgr = img1_color.at<cv::Vec3b>(pv, pu);
+        cr = bgr[2]; cg = bgr[1]; cb = bgr[0];
+      }
+    }
     cv::Mat desc = f1.descriptors.row(kp1);
-    int pid = map_.addMapPoint(p_world, desc);
+    int pid = map_.addMapPoint(p_world, desc, cr, cg, cb);
 
     map_.addObservation(pid, f1.id, kp1);
     map_.addObservation(pid, f2.id, kp2);
@@ -288,6 +314,7 @@ bool VisualFrontendPipeline::initialize(int idx1, int idx2,
   std::cout << "  Rejected depth c2: " << fs.rejected_depth_cam2 << std::endl;
   std::cout << "  Rejected reproj c1:" << fs.rejected_reproj_cam1 << std::endl;
   std::cout << "  Rejected reproj c2:" << fs.rejected_reproj_cam2 << std::endl;
+  std::cout << "  Rejected parallax: " << fs.rejected_low_parallax << std::endl;
   std::cout << "  Accepted:          " << fs.accepted << std::endl;
 
   // Reprojection error stats
@@ -401,6 +428,7 @@ bool VisualFrontendPipeline::trackFrame(int frame_idx,
   std::string img_path =
       dataset_.base_path + "/" + dataset_.rgb_frames[frame_idx].relative_path;
   cv::Mat img = cv::imread(img_path, cv::IMREAD_GRAYSCALE);
+  cv::Mat img_color = cv::imread(img_path, cv::IMREAD_COLOR);
   if (img.empty()) return false;
 
   // Extract features in new frame
@@ -475,6 +503,41 @@ bool VisualFrontendPipeline::trackFrame(int frame_idx,
   T_world_camera.block<3, 3>(0, 0) = R_cw.transpose();
   T_world_camera.block<3, 1>(0, 3) = -R_cw.transpose() * t_cw;
 
+  // ---- Keyframe decision: check baseline to previous keyframe ----
+  // Compute median parallax of PnP inlier features between prev KF and current
+  Eigen::Vector3d cam_pos = T_world_camera.block<3, 1>(0, 3);
+  Eigen::Vector3d prev_pos = prev_kf.T_world_camera.block<3, 1>(0, 3);
+  double baseline = (cam_pos - prev_pos).norm();
+
+  // Estimate parallax: for a point at median depth, what angle does the baseline subtend?
+  // Use median depth of existing map points visible in this frame
+  double median_depth = 0;
+  {
+    std::vector<double> depths;
+    Eigen::Matrix3d R_cw_kf = T_camera_world.block<3, 3>(0, 0);
+    Eigen::Vector3d t_cw_kf = T_camera_world.block<3, 1>(0, 3);
+    for (int i = 0; i < pnp_inliers.rows; ++i) {
+      int inl_idx = pnp_inliers.at<int>(i);
+      int mi = match_with_3d[inl_idx];
+      int pid = prev_kf.map_point_ids[matches[mi].queryIdx];
+      const auto& pos = map_.getPoint(pid).position;
+      double d = (R_cw_kf * pos + t_cw_kf).z();
+      if (d > 0) depths.push_back(d);
+    }
+    if (!depths.empty()) {
+      std::sort(depths.begin(), depths.end());
+      median_depth = depths[depths.size() / 2];
+    }
+  }
+
+  constexpr double kMinKeyframeParallax = 1.0;  // degrees
+  double parallax_deg = 0;
+  if (median_depth > 0) {
+    parallax_deg = std::atan(baseline / median_depth) * 180.0 / M_PI;
+  }
+
+  bool is_keyframe = parallax_deg >= kMinKeyframeParallax;
+
   // ---- Create the new frame ----
   Frame new_frame;
   new_frame.id = frame_idx;
@@ -497,7 +560,29 @@ bool VisualFrontendPipeline::trackFrame(int frame_idx,
     map_.addObservation(pid, new_frame.id, curr_kp);
   }
 
+  // ---- Only triangulate/add new points if this is a keyframe ----
+  if (!is_keyframe) {
+    // Not a keyframe — just update the last keyframe's latest pose for
+    // future reference, but don't add to the map
+    // (We still return true — tracking succeeded, just not a KF)
+    return true;
+  }
+
   // ---- Create new map points from matches without existing 3D ----
+  // Helper: sample BGR color at a pixel location from the color image
+  auto sampleColor = [&img_color](float px, float py,
+                                   uint8_t& cr, uint8_t& cg, uint8_t& cb) {
+    int u = static_cast<int>(std::round(px));
+    int v = static_cast<int>(std::round(py));
+    if (!img_color.empty() && u >= 0 && u < img_color.cols &&
+        v >= 0 && v < img_color.rows && img_color.channels() == 3) {
+      cv::Vec3b bgr = img_color.at<cv::Vec3b>(v, u);
+      cr = bgr[2]; cg = bgr[1]; cb = bgr[0];
+    } else {
+      cr = cg = cb = 128;
+    }
+  };
+
   int new_points = 0;
   std::vector<Eigen::Vector3d> new_point_positions;
 
@@ -527,8 +612,10 @@ bool VisualFrontendPipeline::trackFrame(int frame_idx,
           Eigen::Vector3d p_cam(x, y, z);
           Eigen::Vector3d p_world = R_wc * p_cam + t_wc;
 
+          uint8_t cr, cg, cb;
+          sampleColor(kp.pt.x, kp.pt.y, cr, cg, cb);
           cv::Mat desc = new_frame.descriptors.row(curr_kp);
-          int pid = map_.addMapPoint(p_world, desc);
+          int pid = map_.addMapPoint(p_world, desc, cr, cg, cb);
           map_.addObservation(pid, prev_kf.id, prev_kp);
           map_.addObservation(pid, new_frame.id, curr_kp);
           map_.keyframes().back().map_point_ids[prev_kp] = pid;
@@ -601,8 +688,11 @@ bool VisualFrontendPipeline::trackFrame(int frame_idx,
       int prev_kp = matches[mi].queryIdx;
       int curr_kp = matches[mi].trainIdx;
 
+      uint8_t cr, cg, cb;
+      sampleColor(new_frame.keypoints[curr_kp].pt.x,
+                   new_frame.keypoints[curr_kp].pt.y, cr, cg, cb);
       cv::Mat desc = new_frame.descriptors.row(curr_kp);
-      int pid = map_.addMapPoint(p_world, desc);
+      int pid = map_.addMapPoint(p_world, desc, cr, cg, cb);
       map_.addObservation(pid, prev_kf.id, prev_kp);
       map_.addObservation(pid, new_frame.id, curr_kp);
 
@@ -621,22 +711,18 @@ bool VisualFrontendPipeline::trackFrame(int frame_idx,
     viz->logNewMapPoints(new_point_positions, frame_idx);
   }
 
-  // ---- Per-frame diagnostic (verbose for first 5 frames, then every 50) ----
+  // ---- Per-frame diagnostic ----
   int frames_since_init = frame_idx - map_.keyframes().front().id;
   bool verbose = frames_since_init <= 5 ||
-                 map_.numKeyframes() % 50 == 0;
+                 map_.numKeyframes() % 20 == 0;
   if (verbose) {
-    Eigen::Vector3d pos = T_world_camera.block<3, 1>(0, 3);
-    std::cout << "  [F" << std::setw(3) << frame_idx << "] "
-              << "matches=" << matches.size()
-              << " w3d=" << match_with_3d.size()
-              << " wo3d=" << match_without_3d.size()
-              << " pnp_in=" << pnp_inliers.rows
-              << " new_pts=" << new_points
-              << " tracked=" << total_tracked
-              << " total_map=" << map_.numPoints()
-              << " pos=[" << std::fixed << std::setprecision(3)
-              << pos.x() << " " << pos.y() << " " << pos.z() << "]"
+    std::cout << "  [F" << std::setw(4) << frame_idx << " KF] "
+              << "pnp=" << pnp_inliers.rows
+              << " new=" << new_points
+              << " map=" << map_.numPoints()
+              << " par=" << std::fixed << std::setprecision(1) << parallax_deg
+              << "deg pos=[" << std::setprecision(3)
+              << cam_pos.x() << " " << cam_pos.y() << " " << cam_pos.z() << "]"
               << std::endl;
   }
 
@@ -719,11 +805,31 @@ void VisualFrontendPipeline::run(const PipelineConfig& config) {
       init_last_frame = 0;
       break;
 
-    case SensorConfig::InitMode::IMU:
-      // IMU init not yet implemented; fall through to monocular
-      std::cout << "  (IMU init not implemented, falling back to monocular)"
-                << std::endl;
-      [[fallthrough]];
+    case SensorConfig::InitMode::IMU: {
+      frontend::ImuInitializer imu_init;
+      auto imu_result = imu_init.initialize(
+          dataset_.imu_data, dataset_.rgb_frames,
+          dataset_.intrinsics, tf_tree_);
+
+      if (imu_result.success) {
+        // Use IMU-selected frame pair for monocular initialization.
+        // Gyro rotation selects a pair with sufficient parallax.
+        // Scale remains at unit-baseline (metric scale recovery needs
+        // visual-inertial joint estimation — future work).
+        if (initialize(imu_result.idx1, imu_result.idx2,
+                        viz_enabled ? &rr_viz : nullptr)) {
+          init_ok = true;
+          init_last_frame = imu_result.idx2;
+        }
+      }
+      if (!init_ok) {
+        std::cout << "  IMU init failed, falling back to monocular"
+                  << std::endl;
+        init_ok = initializeMonocular(viz_enabled ? &rr_viz : nullptr);
+        if (init_ok) init_last_frame = map_.keyframes().back().id;
+      }
+      break;
+    }
 
     case SensorConfig::InitMode::MONOCULAR:
       init_ok = initializeMonocular(viz_enabled ? &rr_viz : nullptr);

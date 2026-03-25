@@ -6,9 +6,11 @@
 
 #include "subastral/frontend/depth_initializer.hpp"
 #include "subastral/frontend/feature_extractor.hpp"
+#include "subastral/frontend/imu_initializer.hpp"
+#include "subastral/frontend/imu_preintegrator.hpp"
 #include "subastral/frontend/feature_matcher.hpp"
 #include "subastral/frontend/two_view_geometry.hpp"
-#include "subastral/loader/tum_loader.h"
+#include "subastral/loader/dataset_types.h"
 #include "subastral/pipeline.hpp"
 #include "subastral/types/map.h"
 #include "subastral/types/sensor_config.h"
@@ -53,7 +55,7 @@ class VisualFrontendPipeline : public Pipeline {
   static Eigen::Matrix4d findNearestGTPose(
       const std::vector<loader::GroundTruthPose>& gt, double timestamp);
 
-  loader::TUMDataset dataset_;
+  loader::VisionDataset dataset_;
   SensorConfig sensor_config_;
   std::shared_ptr<TransformTree> tf_tree_;
   Map map_;

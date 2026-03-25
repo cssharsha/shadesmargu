@@ -1,6 +1,7 @@
 #pragma once
 
 #include <Eigen/Core>
+#include <opencv2/core.hpp>
 #include <string>
 
 #include "subastral/types/camera.h"
@@ -32,8 +33,11 @@ class DepthInitializer {
   /// @param min_depth  Minimum valid depth in meters (default: 0.1).
   /// @param max_depth  Maximum valid depth in meters (default: 10.0).
   /// @return Number of valid 3D points created, or 0 on failure.
+  /// @param rgb_image  Color image for sampling point colors (BGR or grayscale).
+  ///                   If empty, points get default gray color.
   int initialize(Frame& frame, const std::string& depth_image_path,
                  const CameraIntrinsics& intrinsics, Map& map,
+                 const cv::Mat& rgb_image = cv::Mat(),
                  double depth_scale = 5000.0, double min_depth = 0.1,
                  double max_depth = 10.0);
 };

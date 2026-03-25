@@ -91,6 +91,43 @@ cc_library(
     ],
 )
 
+# IMU pre-integration (Forster et al.)
+cc_library(
+    name = "imu_preintegrator",
+    srcs = ["imu_preintegrator.cpp"],
+    hdrs = ["imu_preintegrator.hpp"],
+    visibility = ["//visibility:public"],
+    deps = [
+        "//subastral/backend/lie:so3",
+        "//subastral/loader:dataset_types",
+        "@eigen//:eigen",
+    ],
+)
+
+# Gravity direction estimation from static accelerometer data
+cc_library(
+    name = "gravity_initializer",
+    srcs = ["gravity_initializer.cpp"],
+    hdrs = ["gravity_initializer.hpp"],
+    visibility = ["//visibility:public"],
+    deps = [
+        "//subastral/loader:dataset_types",
+        "@eigen//:eigen",
+    ],
+)
+
+cc_test(
+    name = "imu_preintegrator_test",
+    srcs = ["imu_preintegrator_test.cpp"],
+    deps = [
+        ":imu_preintegrator",
+        "//subastral/backend/lie:so3",
+        "@com_google_googletest//:gtest_main",
+        "@eigen//:eigen",
+    ],
+    size = "small",
+)
+
 # Depth-based map initialization (RGB-D)
 cc_library(
     name = "depth_initializer",
@@ -104,14 +141,17 @@ cc_library(
     ],
 )
 
-# IMU-aided initialization (interface only — stub implementation)
+# IMU-aided initialization (gravity alignment + pre-integration for frame selection)
 cc_library(
     name = "imu_initializer",
     srcs = ["imu_initializer.cpp"],
     hdrs = ["imu_initializer.hpp"],
     visibility = ["//visibility:public"],
     deps = [
-        "//subastral/loader:tum_loader",
+        ":gravity_initializer",
+        ":imu_preintegrator",
+        "//subastral/backend/lie:so3",
+        "//subastral/loader:dataset_types",
         "//subastral/types:types",
         "@eigen//:eigen",
     ],

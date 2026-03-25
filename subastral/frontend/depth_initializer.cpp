@@ -10,6 +10,7 @@ namespace frontend {
 int DepthInitializer::initialize(Frame& frame,
                                  const std::string& depth_image_path,
                                  const CameraIntrinsics& intrinsics, Map& map,
+                                 const cv::Mat& rgb_image,
                                  double depth_scale, double min_depth,
                                  double max_depth) {
   cv::Mat depth_raw = cv::imread(depth_image_path, cv::IMREAD_UNCHANGED);
@@ -51,8 +52,21 @@ int DepthInitializer::initialize(Frame& frame,
     Eigen::Vector3d p_cam(x, y, z);
     Eigen::Vector3d p_world = R_wc * p_cam + t_wc;
 
+    // Sample RGB color at keypoint location
+    uint8_t cr = 128, cg = 128, cb = 128;
+    if (!rgb_image.empty() && u >= 0 && u < rgb_image.cols &&
+        v >= 0 && v < rgb_image.rows) {
+      if (rgb_image.channels() == 3) {
+        cv::Vec3b bgr = rgb_image.at<cv::Vec3b>(v, u);
+        cr = bgr[2]; cg = bgr[1]; cb = bgr[0];
+      } else if (rgb_image.channels() == 1) {
+        uint8_t gray = rgb_image.at<uint8_t>(v, u);
+        cr = cg = cb = gray;
+      }
+    }
+
     cv::Mat desc = frame.descriptors.row(i);
-    int pid = map.addMapPoint(p_world, desc);
+    int pid = map.addMapPoint(p_world, desc, cr, cg, cb);
     map.addObservation(pid, frame.id, i);
     frame.map_point_ids[i] = pid;
     ++valid_count;

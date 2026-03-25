@@ -18,11 +18,15 @@ namespace substral {
 class Map {
  public:
   /// Add a new map point. Returns its assigned ID.
-  int addMapPoint(const Eigen::Vector3d& position, const cv::Mat& descriptor) {
+  int addMapPoint(const Eigen::Vector3d& position, const cv::Mat& descriptor,
+                  uint8_t r = 128, uint8_t g = 128, uint8_t b = 128) {
     MapPoint mp;
     mp.id = next_point_id_++;
     mp.position = position;
     mp.descriptor = descriptor.clone();
+    mp.r = r;
+    mp.g = g;
+    mp.b = b;
     points_[mp.id] = std::move(mp);
     return mp.id;
   }
@@ -55,6 +59,7 @@ class Map {
 
   /// Access all map points.
   const std::unordered_map<int, MapPoint>& points() const { return points_; }
+  std::unordered_map<int, MapPoint>& points() { return points_; }
 
   /// Number of map points.
   int numPoints() const { return static_cast<int>(points_.size()); }

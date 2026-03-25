@@ -15,6 +15,9 @@ struct MapPoint {
   // Representative descriptor for matching against new frames
   cv::Mat descriptor;
 
+  // RGB color sampled from the source image at the keypoint location
+  uint8_t r = 128, g = 128, b = 128;
+
   // List of (frame_id, keypoint_index) pairs that observe this point
   std::vector<std::pair<int, int>> observations;
 

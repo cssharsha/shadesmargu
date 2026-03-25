@@ -30,6 +30,7 @@ struct TwoViewResult {
     int rejected_depth_cam2 = 0;
     int rejected_reproj_cam1 = 0;
     int rejected_reproj_cam2 = 0;
+    int rejected_low_parallax = 0;
     int accepted = 0;
 
     // Reprojection errors for accepted points

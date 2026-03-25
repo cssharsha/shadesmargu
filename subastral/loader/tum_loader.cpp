@@ -11,14 +11,14 @@ bool TUMLoader::load(const std::string& sequence_dir) {
   dataset_.base_path = sequence_dir;
 
   // Detect sensor from directory name
-  dataset_.sensor_id = detectSensor(sequence_dir);
-  if (dataset_.sensor_id == 0) {
+  sensor_id_ = detectSensor(sequence_dir);
+  if (sensor_id_ == 0) {
     std::cerr << "Warning: Could not detect freiburg sensor from path: "
               << sequence_dir << "\n"
               << "  Using default intrinsics (freiburg1).\n";
-    dataset_.sensor_id = 1;
+    sensor_id_ = 1;
   }
-  setIntrinsics(dataset_.sensor_id);
+  setIntrinsics(sensor_id_);
 
   // Parse rgb.txt
   std::string rgb_file = sequence_dir + "/rgb.txt";
@@ -48,7 +48,7 @@ bool TUMLoader::load(const std::string& sequence_dir) {
 
 void TUMLoader::printStats() const {
   std::cout << "TUM Dataset: " << dataset_.base_path << "\n"
-            << "  Sensor: freiburg" << dataset_.sensor_id << "\n"
+            << "  Sensor: freiburg" << sensor_id_ << "\n"
             << "  RGB frames: " << dataset_.rgb_frames.size() << "\n"
             << "  Depth frames: " << dataset_.depth_frames.size() << "\n"
             << "  Ground truth poses: " << dataset_.ground_truth.size() << "\n"

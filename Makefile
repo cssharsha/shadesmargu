@@ -92,5 +92,8 @@ rerun:
 	@echo "Rerun web viewer: http://localhost:9090"
 	@echo "gRPC proxy: rerun+http://localhost:9876/proxy"
 
+download-dataset:
+	$(COMPOSE) exec $(SERVICE) python3.10 /workspace/scripts/download_tum.py /data/se $(if $(DATASET),--dataset $(DATASET),) $(if $(CATEGORY),--category $(CATEGORY),)
+
 docker-clean:
 	$(COMPOSE) down

@@ -106,10 +106,7 @@ void VFEVisualizer::logMapPoints(
                                           static_cast<float>(mp.position.y()),
                                           static_cast<float>(mp.position.z())));
 
-    // Color by number of observations (brighter = more observations)
-    int obs = mp.numObservations();
-    uint8_t intensity = static_cast<uint8_t>(std::min(255, 100 + obs * 50));
-    colors.push_back(rerun::Color(intensity, intensity, 200));
+    colors.push_back(rerun::Color(mp.r, mp.g, mp.b));
   }
 
   impl_->rec->log("world/map_points",

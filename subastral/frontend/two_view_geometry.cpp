@@ -129,9 +129,10 @@ void TwoViewGeometry::filterTriangulatedPoints(
   double cx = K.at<double>(0, 2);
   double cy = K.at<double>(1, 2);
 
-  constexpr double kMaxReprojError = 4.0;  // pixels
+  constexpr double kMaxReprojError = 4.0;   // pixels
   constexpr double kMinDepth = 0.01;
   constexpr double kMaxDepth = 100.0;
+  constexpr double kMinParallaxDeg = 0.5;  // reject very low-parallax points
 
   auto& stats = result.filter_stats;
   stats.total_candidates = points4d.cols;
@@ -191,6 +192,10 @@ void TwoViewGeometry::filterTriangulatedPoints(
     double cos_parallax = ray1.dot(ray2);
     double parallax = std::acos(std::max(-1.0, std::min(1.0, cos_parallax))) *
                        180.0 / M_PI;
+    if (parallax < kMinParallaxDeg) {
+      ++stats.rejected_low_parallax;
+      continue;
+    }
 
     // Record stats for accepted point
     stats.reproj_err1.push_back(err1);

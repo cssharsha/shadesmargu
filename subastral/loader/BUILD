@@ -32,11 +32,32 @@ cc_test(
 )
 
 cc_library(
+    name = "dataset_types",
+    hdrs = ["dataset_types.h"],
+    visibility = ["//visibility:public"],
+    deps = [
+        "//subastral/types:types",
+    ],
+)
+
+cc_library(
     name = "tum_loader",
     srcs = ["tum_loader.cpp"],
     hdrs = ["tum_loader.h"],
     visibility = ["//visibility:public"],
     deps = [
+        ":dataset_types",
+        "//subastral/types:types",
+    ],
+)
+
+cc_library(
+    name = "euroc_loader",
+    srcs = ["euroc_loader.cpp"],
+    hdrs = ["euroc_loader.h"],
+    visibility = ["//visibility:public"],
+    deps = [
+        ":dataset_types",
         "//subastral/types:types",
     ],
 )
