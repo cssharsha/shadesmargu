@@ -12,6 +12,21 @@ cc_library(
 )
 
 cc_library(
+    name = "vfe_visualizer",
+    srcs = ["vfe_visualizer.cpp"],
+    hdrs = ["vfe_visualizer.hpp"],
+    deps = [
+        ":ba_visualizer",
+        "@eigen//:eigen",
+        "@rerun_cpp_sdk//:rerun_sdk",
+        "@opencv//:opencv",
+        "//subastral/loader:tum_loader",
+        "//subastral/types:types",
+    ],
+    visibility = ["//visibility:public"],
+)
+
+cc_library(
     name = "pg_visualizer",
     srcs = ["pg_visualizer.cpp"],
     hdrs = ["pg_visualizer.hpp"],

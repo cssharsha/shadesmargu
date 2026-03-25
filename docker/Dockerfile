@@ -53,10 +53,67 @@ RUN apt-get update && apt-get -y install \
     build-essential \
     libtbb-dev \
     libboost-all-dev \
-    libopencv-dev \
     libeigen3-dev \
     gdb \
-    lcov
+    lcov \
+    pkg-config \
+    libgtk-3-dev \
+    libavcodec-dev \
+    libavformat-dev \
+    libswscale-dev \
+    libv4l-dev \
+    libxvidcore-dev \
+    libx264-dev \
+    libjpeg-dev \
+    libpng-dev \
+    libtiff-dev \
+    libatlas-base-dev \
+    gfortran \
+    && rm -rf /var/lib/apt/lists/*
+
+# ===========================================================================
+# OpenCV 4.10.0 with CUDA — built from source with contrib modules
+# Provides GPU-accelerated feature detection (ORB), matching, and image
+# processing via cudafeatures2d, cudaimgproc, cudawarping modules.
+# Installs to /usr/local/ (standard CMake prefix).
+# ===========================================================================
+RUN set -eux; \
+    cd /tmp; \
+    wget -q -O opencv-4.10.0.tar.gz \
+        https://github.com/opencv/opencv/archive/refs/tags/4.10.0.tar.gz; \
+    wget -q -O opencv_contrib-4.10.0.tar.gz \
+        https://github.com/opencv/opencv_contrib/archive/refs/tags/4.10.0.tar.gz; \
+    tar xzf opencv-4.10.0.tar.gz; \
+    tar xzf opencv_contrib-4.10.0.tar.gz; \
+    mkdir opencv-4.10.0/build && cd opencv-4.10.0/build; \
+    cmake .. \
+        -DCMAKE_BUILD_TYPE=Release \
+        -DCMAKE_INSTALL_PREFIX=/usr/local \
+        -DOPENCV_EXTRA_MODULES_PATH=/tmp/opencv_contrib-4.10.0/modules \
+        -DWITH_CUDA=ON \
+        -DCUDA_ARCH_BIN="7.5;8.6;8.9" \
+        -DCUDA_FAST_MATH=ON \
+        -DWITH_CUBLAS=ON \
+        -DWITH_CUDNN=OFF \
+        -DOPENCV_DNN_CUDA=OFF \
+        -DENABLE_FAST_MATH=ON \
+        -DWITH_TBB=ON \
+        -DWITH_GTK=ON \
+        -DWITH_V4L=ON \
+        -DWITH_OPENGL=ON \
+        -DBUILD_opencv_python2=OFF \
+        -DBUILD_opencv_python3=OFF \
+        -DBUILD_TESTS=OFF \
+        -DBUILD_PERF_TESTS=OFF \
+        -DBUILD_EXAMPLES=OFF \
+        -DBUILD_opencv_apps=OFF \
+        -DINSTALL_C_EXAMPLES=OFF \
+        -G Ninja; \
+    ninja -j"$(nproc)"; \
+    ninja install; \
+    ldconfig; \
+    rm -rf /tmp/opencv-4.10.0 /tmp/opencv_contrib-4.10.0 \
+           /tmp/opencv-4.10.0.tar.gz /tmp/opencv_contrib-4.10.0.tar.gz
 
 # Add GTSAM PPA and install GTSAM
 RUN add-apt-repository ppa:borglab/gtsam-release-4.2 \
@@ -117,6 +174,9 @@ RUN set -eux; \
         https://github.com/rerun-io/rerun/releases/download/0.30.2/rerun-cli-0.30.2-x86_64-unknown-linux-gnu; \
     chmod +x /usr/local/bin/rerun; \
     rerun --version
+
+# Python packages needed by dataset download scripts
+RUN python3.10 -m pip install requests
 
 # Create non-root user
 ARG USERNAME=developer

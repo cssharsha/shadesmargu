@@ -77,11 +77,11 @@ new_local_repository(
     path = "/usr",
 )
 
-# OpenCV
+# OpenCV (built from source with CUDA — installed to /usr/local)
 new_local_repository(
     name = "opencv",
     build_file = "//third_party:opencv.BUILD",
-    path = "/usr",
+    path = "/usr/local",
 )
 
 # JSON

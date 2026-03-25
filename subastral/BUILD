@@ -60,6 +60,27 @@ cc_library(
 )
 
 cc_library(
+    name = "visual_frontend_pipeline",
+    srcs = ["visual_frontend_pipeline.cpp"],
+    hdrs = ["visual_frontend_pipeline.hpp"],
+    visibility = ["//visibility:public"],
+    deps = [
+        ":pipeline",
+        "//subastral/frontend:depth_initializer",
+        "//subastral/frontend:feature_extractor",
+        "//subastral/frontend:feature_extractor_cpu",
+        "//subastral/frontend:feature_matcher",
+        "//subastral/frontend:feature_matcher_cpu",
+        "//subastral/frontend:imu_initializer",
+        "//subastral/frontend:two_view_geometry",
+        "//subastral/loader:tum_loader",
+        "//subastral/types:types",
+        "//viz/rerun:vfe_visualizer",
+        "@opencv//:opencv",
+    ],
+)
+
+cc_library(
     name = "subastral_lib",
     srcs = ["subastral.cpp"],
     hdrs = ["subastral.hpp"],
@@ -69,6 +90,7 @@ cc_library(
         ":chordal_init_pipeline",
         ":pipeline",
         ":pose_graph_pipeline",
+        ":visual_frontend_pipeline",
     ],
 )
 

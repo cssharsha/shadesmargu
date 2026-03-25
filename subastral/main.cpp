@@ -44,6 +44,7 @@ static void printUsage(const char* prog) {
       << "  (default)          Bundle Adjustment (BAL format)\n"
       << "  --pose-graph       Pose-Graph SLAM (g2o format)\n"
       << "  --chordal-init     Pose-Graph SLAM with chordal rotation init\n"
+      << "  --visual-frontend  Visual front-end (TUM RGB-D sequence dir)\n"
       << "\nOptions:\n"
       << "  --cpu              Use CPU solver (default: GPU)\n"
       << "  --lie              Use SE(3) Lie group parameterization\n"
@@ -101,6 +102,7 @@ static void* workerThread(void* arg) {
   substral::Subastral subastral;
   bool pose_graph = false;
   bool chordal_init = false;
+  bool visual_frontend = false;
 
   // Parse optional arguments
   for (int i = 2; i < argc; ++i) {
@@ -108,6 +110,8 @@ static void* workerThread(void* arg) {
       pose_graph = true;
     } else if (std::strcmp(argv[i], "--chordal-init") == 0) {
       chordal_init = true;
+    } else if (std::strcmp(argv[i], "--visual-frontend") == 0) {
+      visual_frontend = true;
     } else if (std::strcmp(argv[i], "--cpu") == 0) {
       subastral.config().use_gpu = false;
     } else if (std::strcmp(argv[i], "--lie") == 0) {
@@ -164,7 +168,9 @@ static void* workerThread(void* arg) {
   }
 
   // Create the appropriate pipeline
-  if (chordal_init) {
+  if (visual_frontend) {
+    subastral.createPipeline("visual-frontend");
+  } else if (chordal_init) {
     subastral.createPipeline("chordal-init");
   } else if (pose_graph) {
     subastral.createPipeline("pose-graph");

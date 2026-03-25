@@ -31,6 +31,26 @@ cc_test(
     size = "small",
 )
 
+cc_library(
+    name = "tum_loader",
+    srcs = ["tum_loader.cpp"],
+    hdrs = ["tum_loader.h"],
+    visibility = ["//visibility:public"],
+    deps = [
+        "//subastral/types:types",
+    ],
+)
+
+cc_test(
+    name = "tum_loader_test",
+    srcs = ["tum_loader_test.cpp"],
+    deps = [
+        ":tum_loader",
+        "@com_google_googletest//:gtest_main",
+    ],
+    size = "small",
+)
+
 cc_binary(
     name = "load_bal",
     srcs = ["bal_loader_main.cpp"],

@@ -6,6 +6,7 @@
 #include "subastral/ba_pipeline.hpp"
 #include "subastral/chordal_init_pipeline.hpp"
 #include "subastral/pose_graph_pipeline.hpp"
+#include "subastral/visual_frontend_pipeline.hpp"
 
 namespace substral {
 
@@ -19,12 +20,15 @@ void Subastral::createPipeline(const std::string& mode) {
     pipeline_ = std::make_unique<PoseGraphPipeline>();
   } else if (mode == "chordal-init") {
     pipeline_ = std::make_unique<ChordalInitPipeline>();
+  } else if (mode == "visual-frontend") {
+    pipeline_ = std::make_unique<VisualFrontendPipeline>();
   } else if (mode == "ba") {
     pipeline_ = std::make_unique<BAPipeline>();
   } else {
     throw std::invalid_argument(
         "Unknown pipeline mode: " + mode +
-        " (expected \"ba\", \"pose-graph\", or \"chordal-init\")");
+        " (expected \"ba\", \"pose-graph\", \"chordal-init\", or "
+        "\"visual-frontend\")");
   }
 }
 
